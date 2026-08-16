@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<title>EZVIZ PTZ Test</title>
+<style>
+  body { font-family: sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+  h2 { color: #e94560; }
+  .row { display: flex; gap: 10px; margin: 8px 0; flex-wrap: wrap; }
+  button { padding: 10px 18px; font-size: 16px; cursor: pointer; border: none;
+           border-radius: 4px; background: #0f3460; color: #eee; }
+  button:hover { background: #e94560; }
+  button:active { background: #533483; }
+  #player { width: 640px; height: 360px; margin: 10px 0; border: 2px solid #333; }
+  #log { background: #0a0a1a; padding: 10px; max-height: 200px; overflow-y: auto;
+         font-family: monospace; font-size: 12px; margin-top: 10px; }
+  input { padding: 8px; font-size: 14px; width: 300px; }
+  .speed-row { display: flex; gap: 5px; align-items: center; }
+  .speed-row label { min-width: 60px; }
+</style>
+</head>
+<body>
+<h2>EZVIZ PTZ Test</h2>
+
+<div>
+  <label>AccessToken:</label>
+  <input id="token" value="at.8rin761wdcmoiek731tfcr1d6h7ub01a-3uvhpbn963-1pw9t9p-11z2togvq" size="60">
+</div>
+<div style="margin:5px 0">
+  <label>序列号:</label>
+  <input id="serial" value="F04465701" size="20">
+  <button onclick="init()">初始化播放器</button>
+</div>
+
+<div id="player"></div>
+
+<div class="speed-row">
+  <label>速度 (1-7):</label>
+  <input id="speed" type="number" min="1" max="7" value="2" style="width:50px">
+  <label>时长(秒):</label>
+  <input id="dur" type="number" min="0.1" max="5" step="0.1" value="0.5" style="width:60px">
+</div>
+
+<div class="row">
+  <button onmousedown="move('up')" onmouseup="stopAll()" ontouchstart="move('up')" ontouchend="stopAll()">↑ 上</button>
+</div>
+<div class="row">
+  <button onmousedown="move('left')" onmouseup="stopAll()" ontouchstart="move('left')" ontouchend="stopAll()">← 左</button>
+  <button onclick="stopAll()" style="background:#e94560">■ 停</button>
+  <button onmousedown="move('right')" onmouseup="stopAll()" ontouchstart="move('right')" ontouchend="stopAll()">→ 右</button>
+</div>
+<div class="row">
+  <button onmousedown="move('down')" onmouseup="stopAll()" ontouchstart="move('down')" ontouchend="stopAll()">↓ 下</button>
+</div>
+<div class="row">
+  <button onmousedown="move('zoomIn')" onmouseup="stopAll()">🔍+</button>
+  <button onmousedown="move('zoomOut')" onmouseup="stopAll()">🔍-</button>
+</div>
+
+<div id="log"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/ezuikit-js@8/ezuikit.js"></script>
+<script>
+let player = null;
+let playerReady = false;
+const LOG = [];
+
+function log(msg) {
+  LOG.push(new Date().toLocaleTimeString() + ' ' + msg);
+  document.getElementById('log').innerHTML = LOG.slice(-15).join('<br>');
+  console.log(msg);
+}
+
+function init() {
+  const token = document.getElementById('token').value.trim();
+  const serial = document.getElementById('serial').value.trim();
+
+  if (player) {
+    try { player.stop(); } catch(e) {}
+    document.getElementById('player').innerHTML = '';
+    player = null; playerReady = false;
+  }
+
+  try {
+    player = new EZUIKit.EZUIKitPlayer({
+      id: 'player',
+      accessToken: token,
+      url: 'ezopen://open.ys7.com/' + serial + '/1.hd.live',
+      template: 'simple',
+      width: 640, height: 360,
+      autoplay: true, audio: false,
+      staticPath: 'https://cdn.jsdelivr.net/npm/ezuikit-js@8/ezuikit_static',
+    });
+    log('Player created, waiting for ready...');
+    player.on('ready', () => { playerReady = true; log('✅ Player READY'); });
+    player.on('error', (e) => { log('❌ Error: ' + JSON.stringify(e)); });
+    player.on('play', () => { log('▶ Play'); });
+  } catch(e) {
+    log('❌ Init error: ' + e.message);
+  }
+}
+
+function move(dir) {
+  if (!player) { log('⚠ No player'); return; }
+  const speed = parseInt(document.getElementById('speed').value) || 2;
+  try {
+    // Try different API names
+    if (typeof player.ptzControl === 'function') {
+      player.ptzControl({ action: dir, speed: speed });
+      log('→ ' + dir + ' (speed=' + speed + ') [ptzControl]');
+    } else if (typeof player.move === 'function') {
+      player.move(dir, speed);
+      log('→ ' + dir + ' (speed=' + speed + ') [move]');
+    } else if (typeof player.startMove === 'function') {
+      player.startMove(dir, speed);
+      log('→ ' + dir + ' (speed=' + speed + ') [startMove]');
+    } else if (typeof player.ptz_start === 'function') {
+      player.ptz_start(dir, speed);
+      log('→ ' + dir + ' [ptz_start]');
+    } else {
+      // Print available methods
+      const methods = Object.keys(Object.getPrototypeOf(player)).filter(k => typeof player[k] === 'function');
+      const ptzMethods = methods.filter(m => /ptz|move|pan|tilt/i.test(m));
+      log('❌ No PTZ method found. Candidate methods: ' + (ptzMethods.join(', ') || 'none'));
+    }
+  } catch(e) {
+    log('❌ Move error: ' + e.message);
+  }
+}
+
+function stopAll() {
+  if (!player) return;
+  try {
+    ['left','right','up','down','zoomIn','zoomOut'].forEach(d => {
+      if (typeof player.ptzControl === 'function') {
+        player.ptzControl({ action: d, speed: 0 });
+      } else if (typeof player.stopMove === 'function') {
+        player.stopMove();
+      }
+    });
+    log('■ STOP');
+  } catch(e) { log('Stop error: ' + e.message); }
+}
+
+// Auto-init on load
+window.addEventListener('load', () => {
+  log('Page loaded. Click "初始化播放器" to start.');
+  log('Available: EZUIKit=' + (typeof EZUIKit !== 'undefined'));
+  if (typeof EZUIKit !== 'undefined') {
+    log('EZUIKit.EZUIKitPlayer=' + (typeof EZUIKit.EZUIKitPlayer));
+  }
+});
+</script>
+</body>
+</html>

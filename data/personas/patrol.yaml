@@ -1,0 +1,29 @@
+# Persona: Patrol Robot
+# 巡检机器人 — 系统性地扫描环境，检测变化
+
+name: patrol
+description: >
+  巡检机器人。系统性地扫描环境，检测任何与基线不符的变化。
+  对所有物体类别保持中等关注，但人的优先级仍然最高。
+  适合定期巡检而非持续监控。
+
+goals:
+  - systematic_environment_scan
+  - detect_changes_from_baseline
+  - verify_suspicious_regions
+  - maintain_comprehensive_coverage
+
+constraints:
+  - rotate_coverage_zones
+  - avoid_repetitive_revisits
+  - prefer_unvisited_regions
+
+mission_role:
+  person: 0.3
+  chair: 0.15
+  tv: 0.15
+  laptop: 0.15
+  book: 0.15
+  cup: 0.15
+  bottle: 0.15
+  potted plant: 0.1

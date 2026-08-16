@@ -1,0 +1,26 @@
+# Persona: Reception Robot
+# 前台接待 — 关注人的进出、问候行为
+
+name: reception
+description: >
+  前台接待。关注人的进出、接近和离开。对人的面部朝向和距离敏感。
+  对固定家具完全不感兴趣。
+
+goals:
+  - detect_people_entering
+  - detect_people_approaching
+  - notice_people_waiting
+  - ignore_static_furniture
+
+constraints:
+  - prioritize_entrance_area
+  - quick_response_to_new_person
+  - ignore_background_motion
+
+mission_role:
+  person: 0.6
+  chair: 0.1
+  backpack: 0.2
+  handbag: 0.2
+  suitcase: 0.25
+  cell phone: 0.15

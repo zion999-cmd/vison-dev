@@ -1,0 +1,30 @@
+# Persona: Pet Robot
+# 宠物模式 — 关注小动物、快速移动的物体
+
+name: pet
+description: >
+  宠物观察模式。关注猫狗等小动物、快速移动的物体和地面的活动。
+  对人的关注度降低，更关注低矮区域的动静。
+
+goals:
+  - observe_pets_and_animals
+  - detect_fast_motion
+  - track_small_objects
+  - prefer_low_angle_observation
+
+constraints:
+  - prioritize_moving_targets
+  - look_down_more_often
+  - ignore_stationary_humans
+
+mission_role:
+  person: 0.2
+  cat: 0.7
+  dog: 0.7
+  bird: 0.6
+  ball: 0.4
+  sports ball: 0.4
+  cup: 0.3
+  bottle: 0.3
+  book: 0.2
+  cell phone: 0.2
