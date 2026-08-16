@@ -1,40 +1,41 @@
-# Handoff: 2026-07-14
+# Handoff: 2026-08-16
 
 ## 当前状态
 
-- 分支: master
-- 测试: 66 new (P0008) + 158 existing = 224 pass / 4 pre-existing flaky
+- 分支: master（远端已重建为干净单 commit，见下）
+- 测试: 244 pass / 4 pre-existing flaky（camera_state×2, focus_manager, scene_state）
 
 ## 本次会话做了什么
 
-### P0008: Observation Intent Engine
+### 1. Git 安全清理（密钥）
 
-Implemented. See `proposals/P0008-Observation-Intent-Engine.md`.
+- 远端 `zion999-cmd/vison-dev` 原包含 `config.py` 明文密钥（EZVIZ / dashscope / gateway qwen），已删除远端并重建
+- `config.py` 加入 `.gitignore`（本地保留），新增 `config.example.py`（密钥走环境变量）
+- 完整旧历史备份在 `/tmp/vision-dev-backup.bundle`（420K）
+- 当前远端为单条干净 commit（历史中无 config.py）
+- 提醒：若旧仓库曾 public，密钥仍建议轮换
+
+### 2. P0008.1: Commitment / Dwell Policy
+
+解决 **Commitment Gap**：Runtime 会"决定看什么"，但不会"决定看多久"。注意力 span 平均 ~24s（explore 42% + switched 41%），根因是 Curiosity 公式的 freshness/uncertainty/(1−familiarity) 对持续在场的人塌缩为 0。设计见 `proposals/P0008.1-commitment-dwell-policy.md`。
 
 **新文件：**
-- `runtime/role/persona.py` — Persona dataclass + YAML loader
-- `runtime/role/mission.py` — MissionRole dataclass, MissionRoleCache (TTL), MissionRoleProvider ABC, ObservationContext
-- `runtime/role/mission_llm.py` — LLMMissionProvider (fixed prompt template) + RuleMissionProvider (non-LLM fallback)
-- `data/personas/companion.yaml` — 陪伴机器人 Persona
-- `data/personas/security.yaml` — 安防机器人 Persona
-- `data/personas/reception.yaml` — 前台接待 Persona
-- `data/personas/patrol.yaml` — 巡检机器人 Persona
-- `data/personas/pet.yaml` — 宠物模式 Persona
-- `tests/test_mission_role.py` — 66 tests, full chain coverage
+- `runtime/commitment/engine.py` — CommitmentState, Decision(HOLD/SWITCH/RELEASE), CommitmentEngine（compute_commitment + decide）
+- `runtime/commitment/telemetry.py` — CommitmentTelemetry（start/hold/switch/release）
+- `runtime/commitment/__init__.py`
+- `tests/test_commitment.py` — 19 tests
 
 **修改文件：**
-- `runtime/role/engine.py` — `get_weight()` → EffectiveRole = IntrinsicRole + MissionRole (clamped [0,1])，新增 `mission_cache`、`refresh_entities()`、`intrinsic_weight()`、`mission_boost()`
-- `runtime/main.py` — 连接 MissionRoleCache → RoleEngine，后台线程刷新 MissionRole，`_build_observation_context()`
-- `config.py` — 新增 `PERSONA`, `MISSION_ROLE_PROVIDER`, `MISSION_ROLE_REFRESH_SEC`
-- `CLAUDE.md` — 新增 P0008 设计原则（LLM is Advisor, Persona ≠ Prompt）+ 文件映射
-- `doc/README.md` — Mission Role 层文档 + P0008 模块索引
-- `context/current_state.md` — 更新开发进度
+- `runtime/interest/revisit.py` — 3 处仲裁钩子（anchor-stay 超时 / 切换 / 探索）+ `_commitment_holds()` + `_track_target` 里建立 commitment
+- `runtime/main.py` — 传入 role_engine，30min 周期 flush commitment telemetry
+- `CLAUDE.md` / `doc/README.md` — 登记模块
 
-### 架构原则（本次建立，后续 P9-P12 必须遵守）
+### 架构原则（P0008.1 建立）
 
-1. **LLM 是 Advisor，不是 Controller** — LLM 仅输出 `{"mission_role": {"person": 0.35}}`，不控制 PTZ、Entity、Runtime
-2. **Mission 可失效** — TTL 机制，过期自动归零。去掉 LLM → EffectiveRole = IntrinsicRole → 系统正常工作
-3. **Persona 是 Config，不是 Prompt** — Prompt template 永远固定。新机器人 = new_persona.yaml
+1. **Curiosity vs Commitment** — Curiosity 竞争"下一个看什么"，Commitment 保护"当前看什么"
+2. **熟悉 ≠ 不值得陪伴** — Familiarity 不作为 Commitment 的负项
+3. **commitment_score = role + mission + presence − disengagement**（与 Curiosity 公式完全分离）
+4. **仲裁输出仅 HOLD/SWITCH/RELEASE**，SWITCH 需 challenger_curiosity > commitment + SWITCH_MARGIN（迟滞）
 
 ## 当前阻塞
 
@@ -42,19 +43,15 @@ Implemented. See `proposals/P0008-Observation-Intent-Engine.md`.
 
 ## 下一步任务
 
-1. [ ] 运行 `python runtime/main.py` 验证 MissionRole 刷新（需要 LLM backend）
-2. [ ] Mission Playground: 同一房间，切换 5 个 Persona，观察注意力分布变化
-3. [ ] 观察 `MissionRoleCache` 日志，确认 LLM 输出质量
-4. [ ] P0009: Scene Graph — Entity 空间关系
-5. [ ] P0010: Event Discovery — Temporal Scene
+1. [ ] P0008.1 场景验证（Scenario A/B/C，需接摄像头实测）
+2. [ ] ChatGPT 审查 P0008.1 代码
+3. [ ] Mission Playground / Persona Divergence
+4. [ ] P0009: Scene Graph
 
 ## 关键上下文
 
-- `EffectiveRole = IntrinsicRole + MissionRole`，clamped [0,1]
-- `MissionRoleProvider` 有三种：`llm` (TextAPI), `rule` (persona defaults), `none` (空)
-- 切换 Persona: 修改 `config.py` 中的 `PERSONA = "security"` 等
-- 切换 Provider: 修改 `config.py` 中的 `MISSION_ROLE_PROVIDER = "rule"`
-- MissionRole 刷新在后台 daemon 线程执行，不阻塞主循环
-- `RuleMissionProvider` 无需 LLM，直接用 persona YAML 中的 `mission_role` 默认权重
-- `data/personas/` 目录可自由添加新 YAML，`list_personas()` 自动发现
-- 历史设计决策见 `proposals/`
+- `PERSONA` / `MISSION_ROLE_PROVIDER` 在 `config.py`（已 gitignore，新克隆需 `cp config.example.py config.py`）
+- Commitment 是 **class-scoped**（target_class="person"），entity_id 绑定为后续优化
+- Commitment 常量在 `runtime/commitment/engine.py` 模块级（SWITCH_MARGIN=0.15, SAFETY_MAX_DWELL=1800 等）
+- 4 个 pre-existing flaky 测试与本次改动无关
+- 历史设计决策见 `proposals/` + `context/decisions.md`

@@ -63,6 +63,20 @@ L1: Camera → L2: Detection (YOLO+YuNet+VAD) → L3: SceneState
 - Persona 是 config，不是 Prompt — LLM prompt template 永远固定
 - EffectiveRole = IntrinsicRole + MissionRole（clamped [0,1]）
 
+### P0008.1: Commitment / Dwell Policy
+
+| 文件 | 职责 |
+|------|------|
+| `runtime/commitment/engine.py` | CommitmentState, CommitmentEngine, Decision (HOLD/SWITCH/RELEASE), score + decide |
+| `runtime/commitment/telemetry.py` | CommitmentTelemetry — start/hold/switch/release 结构化日志 |
+| `runtime/interest/revisit.py` | 集成点 — anchor-stay 超时 / 切换 / 探索前仲裁 |
+
+**架构原则：**
+- Curiosity = "新的目标值得去看吗？"，Commitment = "当前目标还值得继续看吗？"
+- 熟悉 ≠ 不值得陪伴 — Familiarity 不作为 Commitment 的负项
+- commitment_score = role + mission + presence − disengagement（与 Curiosity 公式分离）
+- 仲裁输出仅 HOLD / SWITCH / RELEASE，SWITCH 需超过 commitment + SWITCH_MARGIN（迟滞）
+
 ### PTZ 控制
 
 | 文件 | 职责 |

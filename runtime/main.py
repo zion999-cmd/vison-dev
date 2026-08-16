@@ -288,6 +288,7 @@ class PerceptionRuntime:
             anchor_manager=self.anchor_manager,
             entity_registry=self.entity_registry,
             on_decision=self._on_ptz_decision,
+            role_engine=self.role_engine,
         )
 
         # Anchors are built organically by the RevisitController's explore mode
@@ -539,6 +540,8 @@ class PerceptionRuntime:
             if self._frame_count % 9000 == 0:
                 self.mission_telemetry.periodic_flush()
                 self._log_persona_signature()
+                if self.revisit_controller:
+                    self.revisit_controller.commitment_telemetry.log_effectiveness()
 
             # ── Telemetry flush ──
             self.telemetry.maybe_flush(time.time())

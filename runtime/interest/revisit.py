@@ -14,6 +14,8 @@ import time, logging, threading
 from typing import Optional
 
 from runtime.interest.verifier import VLMVerifier, Verdict
+from runtime.commitment.engine import CommitmentEngine, Decision, PRESENCE_WINDOW
+from runtime.commitment.telemetry import CommitmentTelemetry
 
 logger = logging.getLogger("Interest.Revisit")
 
@@ -39,7 +41,7 @@ class RevisitController:
     def __init__(self, interest_engine, servo_ptz, camera_state,
                  object_detector=None, face_detector=None, frame_reader=None,
                  anchor_manager=None, entity_registry=None,
-                 on_decision=None):
+                 on_decision=None, role_engine=None):
         self._engine = interest_engine
         self._servo_ptz = servo_ptz
         self._camera_state = camera_state
@@ -100,6 +102,11 @@ class RevisitController:
         self._attn_peak_interest: float = 0.0  # peak interest during this span
         self._attn_hits: int = 0              # times target was confirmed
         self._attn_last_hit: float = 0.0       # last time target was seen
+
+        # ── P0008.1: Commitment / Dwell Policy ──
+        self.commitment_telemetry = CommitmentTelemetry()
+        self._commitment_engine = CommitmentEngine(
+            role_engine=role_engine, telemetry=self.commitment_telemetry)
 
     def tick(self, now: float, faces=None, objects=None, frame=None):
         """Call periodically from main loop. Non-blocking.
@@ -232,9 +239,17 @@ class RevisitController:
                             self._best_anchor_pan = a.pan
 
                         if should_leave:
+                            # False positive (VLM/flat-interest) — never hold it.
+                            self._commitment_engine.reset()
                             self._attn_end("suppressed")
                             pass  # fall through to target selection
                         elif stayed > max_stay:
+                            # P0008.1: a present person keeps us here past the
+                            # novelty-based stay timeout (the Commitment Gap).
+                            if self._commitment_holds(now):
+                                self._staying_since = now
+                                self._track_target(now)
+                                return
                             if max_stay <= 30.0:
                                 logger.info("Revisit [leave]: %s tier=idle int=%.3f objs=%d "
                                             "track=%.0fs ago → boring, move on",
@@ -390,6 +405,10 @@ class RevisitController:
 
         # No entity/legacy target → try best anchor first, then explore
         if target is None:
+            # P0008.1: no curiosity target — hold if a person is still present.
+            if self._commitment_holds(now):
+                self._track_target(now)
+                return
             if now - self._last_move > 20.0:
                 pan = self._servo_ptz.pan
                 # Exploration should be level (t95), not at tracking tilt
@@ -437,6 +456,12 @@ class RevisitController:
                 return
 
             self._last_revisit = now
+            return
+
+        # ── P0008.1: don't switch to a challenger unless it clearly beats our hold ──
+        challenger = entity_score if target_source == "entity" else legacy_score
+        if self._commitment_holds(now, challenger_curiosity=challenger):
+            self._track_target(now)
             return
 
         # ── Execute movement ──
@@ -584,6 +609,9 @@ class RevisitController:
         # Presence signal: we saw a person/face right now → anchor is "live"
         self._last_track_hit = now
 
+        # P0008.1: establish/refresh commitment to the person being tracked.
+        self._commitment_engine.begin("person", now)
+
         # Offset from center (−1..+1, negative=left side of frame)
         dx = (best_cx - cx) / w
         dy = (best_cy - cy) / h
@@ -689,6 +717,20 @@ class RevisitController:
             "─" * 45,
         )
         self._attn_target = ""
+
+    # ── Commitment (P0008.1) ──
+
+    def _commitment_holds(self, now: float, challenger_curiosity: float = 0.0) -> bool:
+        """True if the CommitmentEngine says HOLD (keep the current target).
+
+        status reflects whether a person is currently present (fresh track hit).
+        """
+        if not self._commitment_engine.has_commitment:
+            return False
+        status = "active" if (now - self._last_track_hit) < PRESENCE_WINDOW else "lost"
+        decision, _reason = self._commitment_engine.arbitrate(
+            challenger_curiosity, status, now)
+        return decision == Decision.HOLD
 
     def _notify_decision(self, target_name: str, decision: str,
                          interest: float = 0, curiosity: float = 0,

@@ -36,6 +36,7 @@ Positioned between attention and cognition. Each layer answers one question:
 | Curiosity | `runtime/interest/engine.py` | minutes | "What's worth revisiting?" |
 | Familiarity | `runtime/familiarity/engine.py` | min–hours | "Have I seen this enough?" |
 | Role | `runtime/role/engine.py` | innate | "Should I care about this class?" |
+| Commitment (P0008.1) | `runtime/commitment/engine.py` | seconds–minutes | "Should I keep watching the current target?" (HOLD/SWITCH/RELEASE) |
 | Importance (Phase 7A) | `runtime/importance/stats_db.py` | hours–days | "What actually causes events?" (OBSERVE only, no formula) |
 
 **Curiosity formula:** `interest × uncertainty × freshness × (1−familiarity) × role − movement_cost`
@@ -87,6 +88,7 @@ CANDIDATE (5 sightings to promote) → ACTIVE → LOST (30 misses) → FORGOTTEN
 - **Immutable patterns** — always return new objects, never mutate in place
 - **LLM is Advisor, not Controller** (P0008) — LLM outputs class-level mission_role weights with TTL. It never controls PTZ, entities, or runtime state. Remove LLM → system still works.
 - **Persona ≠ Prompt** (P0008) — Persona is YAML config, LLM prompt template is fixed. New robot identity = new YAML, not new prompt engineering.
+- **Curiosity vs Commitment** (P0008.1) — Curiosity competes for the next look; Commitment protects the current look. Familiarity is NOT a negative input to Commitment.
 
 ## Explicitly Deferred
 
@@ -143,6 +145,7 @@ runtime/
   interest/            — layered attention: interest, curiosity, entity, anchor, revisit, verifier
   familiarity/         — session-level habituation formula
   role/                — innate class priority weights + P0008 MissionRole (LLM advisor, TTL cache)
+  commitment/          — P0008.1 Commitment/Dwell Policy (HOLD/SWITCH/RELEASE arbiter)
   importance/          — Phase 7A entity stats + Phase 7B quality gate (entity_quality.py)
   telemetry/           — minute-level telemetry + session logging
   eventbus/            — event bus (lightweight pub/sub)

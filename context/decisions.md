@@ -61,3 +61,11 @@
   - Mission 有 TTL，过期自动归零。去掉 LLM → EffectiveRole = IntrinsicRole，系统完全不受影响。
   - Persona 是 YAML config 不是 Prompt——新增机器人身份只需新建 YAML，无需改 Runtime 或 prompt。
 - 替代方案: 考虑过直接在 Curiosity 公式中加 Mission 偏置——但这会污染核心公式。双层 Role 架构保持了 Curiosity 公式不变（仅 role 变量从 intrinsic 变为 effective）。
+
+## ADR-008: P0008.1 Commitment/Dwell Policy — Curiosity 与 Commitment 职责分离
+
+- 日期: 2026-08-16
+- 状态: 已采纳
+- 决策: 新增轻量 Commitment/Dwell Policy，作为当前目标与 challenger 之间的仲裁层，输出仅 HOLD/SWITCH/RELEASE。commitment_score = role + mission + presence − disengagement（与 Curiosity 公式分离），Familiarity 不作为负项。SWITCH 需 challenger_curiosity > commitment + SWITCH_MARGIN（迟滞）。RELEASE 条件为 lost / stale / safety timeout。
+- 理由: 实验发现注意力 span 平均 ~24s，explore+switched ≈ 83%。根因是 Curiosity 公式的 freshness/uncertainty/(1−familiarity) 三项对持续在场的人塌缩为 0，Runtime 把"低 curiosity"错误等价于"不值得继续看"。这是职责耦合——"是否重新探索"与"是否持续关注"是两个不同问题。
+- 替代方案: 考虑过在 Curiosity 公式内给 person 加权重或加 mission 偏置——但 companion 的 person 已封顶在 intrinsic 1.0，clamp 后无效果；且在公式内加权会污染 Curiosity 的语义。独立仲裁层保持了 Curiosity 公式不变。
