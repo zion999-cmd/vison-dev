@@ -4,7 +4,7 @@ ONNX model loader with auto-download for Phase 1 models.
 Supported models:
   - YuNet (face detection)    ~85 KB
   - Silero VAD (voice)        ~1.7 MB
-  - YOLOv8-nano (objects)     ~6 MB
+  - YOLO11n (objects)         ~11 MB
 """
 
 import logging
@@ -23,7 +23,7 @@ DEFAULT_PROVIDERS = ["CPUExecutionProvider"]
 _MODEL_URLS = {
     "yunet": "https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
     "silero_vad": "https://github.com/snakers4/silero-vad/raw/master/src/silero_vad/data/silero_vad.onnx",
-    "yolov8n": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.onnx",
+    "yolo11n": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11n.onnx",
     "yolov8s": "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolov8s.onnx",
 }
 

@@ -18,7 +18,7 @@ pytest -q                  # all tests must pass
 
 ```
 L1: Camera → frame (cv2.VideoCapture, 640x480)
-L2: FrameDiff (motion gate) → YuNet ONNX (faces) + YOLOv8n ONNX (80 classes) + Silero VAD (voice)
+L2: FrameDiff (motion gate) → YuNet ONNX (faces) + YOLO11n ONNX (80 classes) + Silero VAD (voice)
 L3: SceneState — Idle → Focus → Alert → Sleep, ~3s debounce
 L4: AttentionEngine — dynamic weighted scoring + decay + self-evolving weights
      → IntentionEngine — 8 intentions (emergency/speaking/looking/approaching/gesturing/using_desk/leaving/ambient)
@@ -150,7 +150,7 @@ runtime/
   telemetry/           — minute-level telemetry + session logging
   eventbus/            — event bus (lightweight pub/sub)
   utils/               — logging config, model loader, vision API client
-models/                — ONNX model files (YuNet, YOLOv8n, Silero VAD)
+models/                — ONNX model files (YuNet, YOLO11n, Silero VAD)
 tests/                 — pytest unit tests
 scripts/               — one-off diagnostic/calibration scripts
 doc/                   — architecture docs + documentation index (see doc/README.md)

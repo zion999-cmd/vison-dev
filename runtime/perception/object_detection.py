@@ -1,7 +1,7 @@
 """
 Perception - L2: Object Detection
 
-Primary: YOLOv8-nano ONNX (80 classes, GPU inference).
+Primary: YOLO11n ONNX (80 classes, CPU inference).
 Fallback: contour-based frame differencing (no classification, but works).
 
 Replaces contour-based object_diff.py.
@@ -21,7 +21,7 @@ from runtime.utils.model_loader import ensure_model, load_session
 
 logger = logging.getLogger("L2.ObjectDet")
 
-_YOLO_MODEL_KEY = "yolov8s"  # v8.40 small — better accuracy than nano
+_YOLO_MODEL_KEY = "yolo11n"  # YOLO11 nano — CPU inference fits the 5 FPS budget
 _INPUT_SIZE = (640, 640)
 _IOU_THRESHOLD = 0.45
 
@@ -134,7 +134,7 @@ class _ContourDetector:
 
 class ObjectDetector:
     """
-    Object detection with YOLOv8-nano ONNX (primary) or contour diff (fallback).
+    Object detection with YOLO11n ONNX (primary) or contour diff (fallback).
 
     If the YOLO ONNX model is not available locally, falls back to
     contour-based detection that detects "something changed" without
@@ -150,13 +150,13 @@ class ObjectDetector:
         self._init_yolo()
 
     def _init_yolo(self) -> None:
-        """Try to load YOLOv8 ONNX. Fall back to contour detector if unavailable."""
+        """Try to load YOLO11n ONNX. Fall back to contour detector if unavailable."""
         try:
             import onnxruntime as ort
             path = ensure_model(_YOLO_MODEL_KEY)
             self._yolo = load_session(str(path))
             self._input_name = self._yolo.get_inputs()[0].name
-            logger.info("ObjectDetector: YOLOv8-nano ONNX loaded")
+            logger.info("ObjectDetector: %s ONNX loaded (%s)", _YOLO_MODEL_KEY, path.name)
         except Exception as e:
             logger.warning("YOLO model not available (%s), using contour fallback", e)
 

@@ -7,7 +7,7 @@
 ```
 L1: Camera (cv2.VideoCapture, 640x480, 5FPS)
     ↓
-L2: Detection — FrameDiff (motion gate) → YuNet ONNX (faces) + YOLOv8n ONNX (80 classes) + Silero VAD (voice)
+L2: Detection — FrameDiff (motion gate) → YuNet ONNX (faces) + YOLO11n ONNX (80 classes) + Silero VAD (voice)
     ↓
 L3: SceneState — Idle → Focus → Alert → Sleep, ~3s debounce
     ↓

@@ -6,7 +6,7 @@ Future-proofing for YOLO World / GroundingDINO / CLIP / SigLIP:
     for open-vocabulary detectors.
 
 Current detectors:
-    - YOLOv8s ONNX (runtime/perception/object_detection.py)
+    - YOLO11n ONNX (runtime/perception/object_detection.py)
     - Contour fallback (same file)
     - Face detector (runtime/perception/face_detection.py) — returns dicts
 
