@@ -22,6 +22,9 @@
 | [P0006](P0006-role-engine.md) | Role Engine 先天优先权重 | Implemented | chat_history5.txt |
 | [P0007](P0007-importance-observatory-phase-7a.md) | Importance Observatory Phase 7A | Implemented | chat_history6.txt |
 | [P0007B](P0007B-Entity-Grounding-&-Signal-Purification.md) | Entity Grounding & Signal Purification | Implemented | 2026-07-03 |
+| [P0007C](P0007C-Attention-Ecology-Stabilizatio.md) | Attention Ecology Stabilization | Implemented | 2026-07-03 |
+| [P0008](P0008-Observation-Intent-Engine.md) | Observation Intent Engine | Implemented | 2026-07-13 |
+| [P0008.1](P0008.1-commitment-dwell-policy.md) | Commitment / Dwell Policy | Implemented (hardware validation pending) | 2026-08-16 |
 
 ## 架构演进路线
 
@@ -41,6 +44,12 @@ P0006: Role Engine（先天偏置）
 P0007: Importance Observatory（Phase 7A, 观测阶段）
   ↓
 P0007B: Entity Grounding & Signal Purification（Phase 7B, 信号提纯）
+  ↓
+P0007C: Attention Ecology Stabilization（Phase 7C, 稳定性观测）
+  ↓
+P0008: Observation Intent Engine（LLM 动态 Mission Role）
+  ↓
+P0008.1: Commitment / Dwell Policy（HOLD/SWITCH/RELEASE 仲裁）
   ↓
 Phase 7B+: Value Engine（未来，基于干净信号）
 ```

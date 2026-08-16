@@ -16,7 +16,7 @@
 - [x] Phase 7B: Entity Grounding & Signal Purification（Quality Gate + Merge + Noise Detection）
 - [x] Phase 7C: Stability Analysis（5 metrics, auto daily report）— verdict **UNSTABLE** (0/5)
 - [x] P0008: Observation Intent Engine（LLM 动态 Mission Role, Persona≠Prompt, Role 可组合化）
-- [x] P0008.1: Commitment / Dwell Policy（HOLD/SWITCH/RELEASE arbiter，Curiosity 与 Commitment 职责分离）
+- [x] P0008.1: Commitment / Dwell Policy（HOLD/SWITCH/RELEASE arbiter，Curiosity 与 Commitment 职责分离）— implementation done，unit tests 244 pass / 4 pre-existing flaky，**hardware A/B/C validation pending**
 - [x] 仓库安全重建：config.py 移出 git（密钥），新增 config.example.py，远端为干净单 commit 历史
 
 ## 进行中
@@ -25,7 +25,7 @@
 
 ## 下一步
 
-1. [ ] P0008.1 场景验证（Scenario A/B/C：person 20min HOLD / 新物体 SWITCH / 离开 RELEASE，需接摄像头）
+1. [ ] P0008.1 Hardware validation: Pending（Scenario A/B/C：person 20min HOLD / 新物体 SWITCH / 离开 RELEASE）
 2. [ ] ChatGPT 审查 P0008.1 代码
 3. [ ] Mission Playground — 同一房间切换 5 个 Persona，对比注意力分布
 4. [ ] Persona Divergence 指标（Jensen-Shannon Distance between persona attention distributions）

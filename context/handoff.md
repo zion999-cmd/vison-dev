@@ -17,6 +17,8 @@
 
 ### 2. P0008.1: Commitment / Dwell Policy
 
+**状态**: Implemented — unit tests 19/19 通过；**Hardware validation: Pending**（Scenario A/B/C 未在硬件验证）。
+
 解决 **Commitment Gap**：Runtime 会"决定看什么"，但不会"决定看多久"。注意力 span 平均 ~24s（explore 42% + switched 41%），根因是 Curiosity 公式的 freshness/uncertainty/(1−familiarity) 对持续在场的人塌缩为 0。设计见 `proposals/P0008.1-commitment-dwell-policy.md`。
 
 **新文件：**
@@ -43,7 +45,7 @@
 
 ## 下一步任务
 
-1. [ ] P0008.1 场景验证（Scenario A/B/C，需接摄像头实测）
+1. [ ] P0008.1 Hardware validation: Pending（Scenario A/B/C 需接摄像头实测；单测 19/19 通过但未行为验证）
 2. [ ] ChatGPT 审查 P0008.1 代码
 3. [ ] Mission Playground / Persona Divergence
 4. [ ] P0009: Scene Graph

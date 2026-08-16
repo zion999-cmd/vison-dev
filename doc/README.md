@@ -15,7 +15,7 @@
 | 文件 | 内容 | 适用场景 |
 |------|------|---------|
 | [../interaction/README.md](../interaction/README.md) | AI Agent 交互方法论总览 | 多 AI 工具协作开发 |
-| [../proposals/](../proposals/) | 9 个历史 Proposal（P0001–P0007C + P0008） | 了解设计演进和架构决策 |
+| [../proposals/](../proposals/) | 11 个 Proposal（P0001–P0008.1） | 了解设计演进和架构决策 |
 
 ### interaction/ 文件索引
 
