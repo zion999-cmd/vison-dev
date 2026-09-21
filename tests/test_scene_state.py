@@ -59,12 +59,41 @@ class TestSceneState:
         ss.update(people=[{"bbox": {}}])  # → FOCUS
         assert ss.attention_multiplier == 0.7
 
-    def test_desk_changed_flag(self):
+    def test_desk_changed_requires_sustained_anchor_novelty(self):
+        """desk_changed tracks the anchor baseline (anchor_novelty), not the
+        object list, and needs 2 consecutive novel frames before it latches."""
         ss = SceneState()
-        ss.update(objects=[{"class_name": "cup"}])
-        ss.update(objects=[{"class_name": "book"}])  # class changed 2x → triggers
-        state = ss.get()
-        assert state["desk_changed"] is True
+        ss.update(anchor_novelty=0.5)
+        assert ss.get()["desk_changed"] is False  # first novel frame — not yet
+        ss.update(anchor_novelty=0.5)
+        assert ss.get()["desk_changed"] is True   # sustained novelty → latched
+
+    def test_desk_changed_auto_clears_when_novelty_drops(self):
+        ss = SceneState()
+        ss.update(anchor_novelty=0.5)
+        ss.update(anchor_novelty=0.5)
+        assert ss.get()["desk_changed"] is True
+        ss.update(anchor_novelty=0.1)
+        assert ss.get()["desk_changed"] is False
+
+    def test_desk_changed_is_driven_by_novelty_not_object_churn(self):
+        """Object churn must not be sufficient for desk_changed, but the same
+        object stream plus real novelty must still latch — otherwise churn
+        made the flag flicker on every misclassification."""
+        ss = SceneState()
+        churn = [
+            [{"class_name": "cup"}],
+            [{"class_name": "book"}],
+            [{"class_name": "cup"}, {"class_name": "book"}],
+            [{"class_name": "phone"}],
+        ]
+        for objects in churn:
+            ss.update(objects=objects, anchor_novelty=0.0)
+        assert ss.get()["desk_changed"] is False  # churn alone never latches
+
+        ss.update(objects=churn[0], anchor_novelty=0.5)
+        ss.update(objects=churn[1], anchor_novelty=0.5)
+        assert ss.get()["desk_changed"] is True  # novelty still drives it
 
     def test_get_returns_all_fields(self):
         ss = SceneState()

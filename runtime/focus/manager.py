@@ -8,8 +8,9 @@ Key principles:
   - Focus persistence: don't switch targets every frame
   - Inertia: maintain focus 2-3s after target disappears
   - Switch threshold: only change if new target > current * 1.5
-  - Scan mode: when idle too long, simulate attention drift
   - Recent targets: short-term memory for "刚才那个人" continuity
+
+Exploration/scanning is NOT handled here — RevisitController owns it.
 """
 
 import time
@@ -43,20 +44,17 @@ class FocusManager:
         switch_ratio: float = 1.5,
         decay_rate: float = 0.95,
         lost_timeout: float = 2.5,
-        idle_scan_time: float = 10.0,
     ):
         self.switch_ratio = switch_ratio       # new_score must be > current * ratio to switch
         self.decay_rate = decay_rate            # per-frame score decay when target is lost
         self.lost_timeout = lost_timeout        # seconds before giving up on lost target
-        self.idle_scan_time = idle_scan_time    # seconds idle before entering scan mode
 
         self.current: Optional[FocusTarget] = None
-        self.mode: str = "idle"                 # "idle" | "tracking" | "lost" | "scanning"
+        self.mode: str = "idle"                 # "idle" | "tracking" | "lost"
         self.recent: deque = deque(maxlen=5)
 
         self._last_mode: str = "idle"
         self._last_target_id: str = ""
-        self._idle_since: float = time.time()
 
     def reset_tracking(self):
         """Clear tracking state — called when PTZ moves, so old bboxes
@@ -64,7 +62,6 @@ class FocusManager:
         self.current = None
         self.mode = "idle"
         self._last_target_id = ""
-        self._idle_since = time.time()
 
     # ── Public API ──
 
@@ -92,8 +89,6 @@ class FocusManager:
             if candidate is not None and candidate.attention_score > 0.3:
                 self._lock(candidate)
                 changed = True
-            else:
-                self._check_scan(now)
         else:
             # Has focus — check if target still exists
             still_there = self._find_current_in_frame(scored_events, faces, objects)
@@ -105,7 +100,6 @@ class FocusManager:
                 if still_there.get("bbox"):
                     self.current.bbox = still_there["bbox"]
                 self.mode = "tracking"
-                self._idle_since = now
             else:
                 # Target lost — decay, but don't immediately drop
                 self.mode = "lost"
@@ -118,7 +112,6 @@ class FocusManager:
                     else:
                         self._release()
                         changed = True
-                        self._check_scan(now)
                 else:
                     # Still hoping target comes back — decay score
                     self.current.attention_score *= self.decay_rate
@@ -207,7 +200,6 @@ class FocusManager:
         old_id = self.current.target_id if self.current else "none"
         self.current = target
         self.mode = "tracking"
-        self._idle_since = target.locked_at
         logger.info("[FOCUS] %s → %s (score=%.2f, type=%s)",
                     old_id, target.target_id, target.attention_score, target.target_type)
 
@@ -219,14 +211,6 @@ class FocusManager:
                         self.current.target_id, len(self.recent))
         self.current = None
         self.mode = "idle"
-
-    def _check_scan(self, now: float):
-        """Enter scan mode if idle too long."""
-        idle_dur = now - self._idle_since
-        if idle_dur > self.idle_scan_time:
-            self.mode = "idle"  # no forced scan — RevisitController handles exploration
-        else:
-            self.mode = "idle"
 
     def _snapshot(self, changed: bool) -> Dict:
         """Build the return dict. Track delta for logging."""

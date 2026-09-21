@@ -73,7 +73,7 @@ class TestFocusManager:
         fm.update([{"type": "human_face", "score": 0.8}], {}, [{"bbox": {}}], [])
         info = fm.update([], {}, [], [])  # lost, timeout=0 → release
         assert not info["has_focus"]
-        assert info["mode"] in ("idle", "scanning")
+        assert info["mode"] == "idle"
 
     def test_recent_targets_recorded_on_release(self):
         fm = FocusManager(lost_timeout=0.0)
@@ -86,7 +86,11 @@ class TestFocusManager:
         info = fm.update([{"type": "background_change", "score": 0.1}], {}, [], [])
         assert not info["has_focus"]
 
-    def test_scan_mode_after_long_idle(self):
-        fm = FocusManager(idle_scan_time=0.0)  # immediate scan
-        info = fm.update([], {}, [], [])
-        assert info["mode"] == "scanning"
+    def test_stays_idle_without_candidates(self):
+        """FocusManager has no scan mode — exploration belongs to
+        RevisitController, so an empty scene simply leaves it idle."""
+        fm = FocusManager()
+        for _ in range(3):
+            info = fm.update([], {}, [], [])
+        assert info["mode"] == "idle"
+        assert not info["has_focus"]

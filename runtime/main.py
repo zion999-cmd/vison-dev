@@ -934,7 +934,6 @@ class PerceptionRuntime:
         mode_colors = {
             "tracking": (0, 255, 255),   # yellow
             "lost": (0, 165, 255),       # orange
-            "scanning": (255, 255, 0),   # cyan
             "idle": (200, 200, 200),     # grey
         }
         mc = mode_colors.get(focus_mode.lower(), (255, 255, 255))

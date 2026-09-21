@@ -71,7 +71,7 @@ class SceneState:
         self._transition_events: List[Dict] = []
         self._user_vanished_at: float = 0.0  # debounce timer for user_left
         self._emergency_counter: float = 0.0  # temporal escalation
-        self._obj_change_count: int = 0       # stability counter for desk_changed
+        self._novelty_count: int = 0          # stability counter for desk_changed
 
     # ── State Machine ──
 
@@ -173,11 +173,11 @@ class SceneState:
         # actually changed (AnchorManager detected new/disappeared objects).
         # Auto-clears when novelty drops back.
         if anchor_novelty > 0.3:
-            if getattr(self, '_novelty_count', 0) >= 1:
+            if self._novelty_count >= 1:
                 self._state["desk_changed"] = True
                 self._novelty_count = 0
             else:
-                self._novelty_count = getattr(self, '_novelty_count', 0) + 1
+                self._novelty_count += 1
         else:
             self._novelty_count = 0
             self._state["desk_changed"] = False  # auto-clear when no real change

@@ -4,13 +4,28 @@ This file provides guidance to Codex (Codex.ai/code) when working with code in t
 
 See [README.md](README.md) for a high-level project overview.
 
+## Setup
+
+```bash
+conda activate vision-dev          # env: /usr/local/Caskroom/miniconda/base/envs/vision-dev
+cp config.example.py config.py     # REQUIRED — config.py is git-ignored, absent from a fresh clone
+```
+
+`config.py` is git-ignored (`.gitignore:9`), so a fresh clone has no copy at all — hence the `cp` above. Secrets are read from env vars there (`DASHSCOPE_API_KEY`, `GATEWAY_QWEN_API_KEY`, `EZVIZ_*`) — never commit it. Run commands must go through the conda env; the system Python has no pytest/onnxruntime.
+
 ## Run & Test
 
 ```bash
 conda activate vision-dev
-python runtime/main.py     # full pipeline (L1-L6 + PTZ)
-pytest -q                  # all tests must pass
+python runtime/main.py                     # full pipeline (L1-L6 + PTZ)
+pytest -q                                  # full suite
+pytest tests/test_commitment.py -q         # single file
+pytest tests/test_commitment.py -q -k switch   # single test by keyword
 ```
+
+**No Arduino → startup still succeeds, but the pipeline runs degraded.** `ServoPTZ.start()` logs an error and returns `False`; no worker thread is ever started, so nothing drains `_queue`, and `moving` (`_moving or len(_queue) > 0`) then latches `True` for the rest of the process. That pins `ego_motion` on permanently: the frame-diff gate is skipped, `focus.reset_tracking()` runs every frame so focus never persists, and `camera_settled` is never true so anchors are never observed. A missing mic is benign (VAD only).
+
+**The suite is expected to be fully green.** There are no knowingly-failing tests — treat any failure as a real regression, not as known drift.
 
 ## Architecture
 
@@ -78,6 +93,15 @@ CANDIDATE (5 sightings to promote) → ACTIVE → LOST (30 misses) → FORGOTTEN
 3. **Explore** turn: random left/right, return to best anchor if interest>0.25
 4. **Track target**: proportional pan/tilt adjustments at 1.5s intervals
 
+### Two independent LLM paths (both optional, different config keys)
+
+| Path | Config keys | Role |
+|------|-------------|------|
+| L6 cognition | `TEXT_API_*` (text), `VLM_BACKENDS` (rotating list) | explains a triggered frame; rotates backends, so a dead one doesn't stall the pipeline |
+| P0008 Mission Role | `MISSION_LLM_*`, `MISSION_ROLE_PROVIDER` | advisor weights + TTL, refreshed on expiry |
+
+These are separate backends — configuring one does not configure the other. `MISSION_ROLE_PROVIDER = "none"` plus unreachable backends is a supported configuration: the runtime runs with zero LLM.
+
 ## Key Design Principles
 
 - **No VLM/LLM in core layers** — YOLO + YuNet + HSV only. VLM is for L6 cognition trigger and optional anchor verification only
@@ -108,6 +132,10 @@ This project follows the AI Agent Interaction Methods documented in `interaction
 
 See `interaction/README.md` for the full methodology index.
 
+`DEVELOPMENT.md` holds the mandatory per-change workflow (code review → tests → docs → commit).
+
+**`CLAUDE.md` is a near-verbatim copy of this file** — they differ only in the title and which agent is named as implementer. Any change to architecture here must be mirrored there in the same commit (see commit `ec10994`).
+
 ## Context Files
 
 Agent 在开始工作前应按顺序读取：
@@ -126,7 +154,7 @@ Agent 在开始工作前应按顺序读取：
 ## Project File Map
 
 ```
-config.py              — all constants (FPS, thresholds, API keys, servo port)
+config.py              — all constants (FPS, thresholds, API keys, servo port); GIT-IGNORED, copy from config.example.py
 context/               — project memory: current_state, handoff, decisions (shared by all agents)
 proposals/             — ChatGPT-generated design proposals (P000X-xxx.md)
 data/
