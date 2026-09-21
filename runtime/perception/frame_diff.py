@@ -36,7 +36,20 @@ class FrameDiff:
         """
         small = frame_bgr[::2, ::2]
 
-        if self._prev is None:
+        # Frames are sampled by stride, so the cached reference keeps the
+        # camera's geometry. A capture device can renegotiate resolution
+        # mid-stream (e.g. 4:3 → 16:9 after another app grabs the camera),
+        # which made the subtraction below broadcast-fail and kill the loop.
+        # Treat the new geometry as "changed" and reseed.
+        if self._prev is None or self._prev.shape != small.shape:
+            if self._prev is not None:
+                logger.warning(
+                    "Frame geometry changed %s → %s — reseeding reference frame",
+                    self._prev.shape, small.shape,
+                )
+                # Nothing comparable to measure against, so don't keep
+                # reporting the previous geometry's motion level.
+                self._motion_level = 0.0
             self._prev = small
             return True
 
