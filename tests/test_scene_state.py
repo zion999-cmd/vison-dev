@@ -95,6 +95,73 @@ class TestSceneState:
         ss.update(objects=churn[1], anchor_novelty=0.5)
         assert ss.get()["desk_changed"] is True  # novelty still drives it
 
+    def test_desk_changed_latches_under_production_call_pattern(self):
+        """Regression: main.py calls update() twice per frame.
+
+        u1 carries anchor_novelty; u2 follows with intention only. Treating
+        u2's omitted anchor_novelty as an explicit 0.0 cleared _novelty_count
+        on every frame, so the two-frame latch was unreachable in production
+        even with sustained novelty.
+        """
+        ss = SceneState()
+
+        # Frame N: u1 (novelty) then u2 (intention only), as main.py does.
+        ss.update(objects=[{"class_name": "cup"}], anchor_novelty=0.5)
+        ss.update(intention="ambient")
+        assert ss.get()["desk_changed"] is False  # first frame only counts
+
+        # Frame N+1
+        ss.update(objects=[{"class_name": "cup"}], anchor_novelty=0.5)
+        ss.update(intention="ambient")
+        assert ss.get()["desk_changed"] is True  # latched despite u2
+
+    def test_intention_only_update_does_not_clear_latched_flag(self):
+        """A call without a novelty observation must not clear the latch."""
+        ss = SceneState()
+        ss.update(anchor_novelty=0.5)
+        ss.update(anchor_novelty=0.5)
+        assert ss.get()["desk_changed"] is True
+        ss.update(intention="ambient")  # no observation this call
+        assert ss.get()["desk_changed"] is True
+
+    def test_explicit_zero_novelty_clears_the_streak(self):
+        """None means "no observation"; 0.0 means "observed zero" and resets
+        the streak, so one later high frame must not latch on its own."""
+        ss = SceneState()
+        ss.update(anchor_novelty=0.5)   # streak = 1
+        ss.update(anchor_novelty=0.0)   # explicit zero → streak reset
+        ss.update(anchor_novelty=0.5)   # streak = 1 again, not a latch
+        assert ss.get()["desk_changed"] is False
+
+    def test_explicit_zero_novelty_prevents_latch_under_production_pattern(self):
+        """Counter-example to the latch test: an explicit 0.0 observation
+        resets the streak, so the two-frame latch never completes."""
+        ss = SceneState()
+        ss.update(objects=[{"class_name": "cup"}], anchor_novelty=0.5)
+        ss.update(intention="ambient")
+
+        ss.update(objects=[{"class_name": "cup"}], anchor_novelty=0.0)
+        ss.update(intention="ambient")
+        assert ss.get()["desk_changed"] is False
+
+        # The 0.0 must have reset the streak: one high frame is not enough.
+        ss.update(objects=[{"class_name": "cup"}], anchor_novelty=0.5)
+        ss.update(intention="ambient")
+        assert ss.get()["desk_changed"] is False
+
+    def test_latched_flag_clears_under_production_pattern(self):
+        """Once latched, a later explicit 0.0 observation still clears it,
+        even though every frame ends with an intention-only call."""
+        ss = SceneState()
+        for _ in range(2):  # two frames latch it
+            ss.update(objects=[{"class_name": "cup"}], anchor_novelty=0.5)
+            ss.update(intention="ambient")
+        assert ss.get()["desk_changed"] is True
+
+        ss.update(objects=[{"class_name": "cup"}], anchor_novelty=0.0)
+        ss.update(intention="ambient")
+        assert ss.get()["desk_changed"] is False
+
     def test_get_returns_all_fields(self):
         ss = SceneState()
         state = ss.get()

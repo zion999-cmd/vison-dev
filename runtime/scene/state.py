@@ -121,7 +121,7 @@ class SceneState:
         objects: Optional[List[Dict]] = None,
         voice_activity: Optional[bool] = None,
         intention: Optional[str] = None,
-        anchor_novelty: float = 0.0,
+        anchor_novelty: Optional[float] = None,
     ):
         """Update scene state + drive state machine."""
         now = time.time()
@@ -172,15 +172,22 @@ class SceneState:
         # desk_changed: transient flag — only true when anchor baseline
         # actually changed (AnchorManager detected new/disappeared objects).
         # Auto-clears when novelty drops back.
-        if anchor_novelty > 0.3:
-            if self._novelty_count >= 1:
-                self._state["desk_changed"] = True
-                self._novelty_count = 0
+        #
+        # anchor_novelty=None means "this update carries no novelty
+        # observation" and must leave the latch state untouched. main.py
+        # updates the intention in a second call per frame; treating that
+        # omission as novelty=0 reset the counter every frame and made the
+        # latch unreachable. Explicit 0.0 still means "observed zero".
+        if anchor_novelty is not None:
+            if anchor_novelty > 0.3:
+                if self._novelty_count >= 1:
+                    self._state["desk_changed"] = True
+                    self._novelty_count = 0
+                else:
+                    self._novelty_count += 1
             else:
-                self._novelty_count += 1
-        else:
-            self._novelty_count = 0
-            self._state["desk_changed"] = False  # auto-clear when no real change
+                self._novelty_count = 0
+                self._state["desk_changed"] = False  # auto-clear when no real change
 
         if voice_activity is not None:
             self._state["voice_activity"] = voice_activity
