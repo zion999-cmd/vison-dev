@@ -141,12 +141,16 @@ class SceneState:
                 # User vanished → start debounce timer, don't transition yet
                 if self._user_vanished_at == 0.0:
                     self._user_vanished_at = now
-            elif not prev_present and not self._state["user_present"]:
-                # Still gone — check if debounce expired
-                if self._user_vanished_at > 0.0 and (now - self._user_vanished_at) >= STATE_DEBOUNCE_LEAVE:
-                    self._try_transition("user_left")
-                    self._user_vanished_at = 0.0
-                    triggered = True
+
+        # The leave debounce is time-based and keeps ticking on frames that
+        # carry no people observation. Gating it on `people is not None` meant
+        # a departure detected on a moving frame never completed once the
+        # scene went still, leaving FOCUS to expire via the 30s state timeout
+        # instead of the intended user_left trigger.
+        if self._user_vanished_at > 0.0 and (now - self._user_vanished_at) >= STATE_DEBOUNCE_LEAVE:
+            self._try_transition("user_left")
+            self._user_vanished_at = 0.0
+            triggered = True
 
         if motion_level is not None:
             if motion_level > 0.1:
@@ -165,9 +169,11 @@ class SceneState:
                     self._emergency_counter = 0
                     triggered = True
 
+        # objects=None means "no observation supplied" (preserve); objects=[]
+        # means "observed zero objects" (clear). Collapsing the two left a
+        # stale object list that could never be emptied.
         if objects is not None:
-            if objects:
-                self._state["objects"] = objects
+            self._state["objects"] = objects
 
         # desk_changed: transient flag — only true when anchor baseline
         # actually changed (AnchorManager detected new/disappeared objects).

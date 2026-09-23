@@ -162,6 +162,20 @@ class TestSceneState:
         ss.update(intention="ambient")
         assert ss.get()["desk_changed"] is False
 
+    def test_objects_none_preserves_previous_observation(self):
+        """None means 'no object observation supplied' — state is preserved."""
+        ss = SceneState()
+        ss.update(objects=[{"class_name": "cup"}])
+        ss.update(objects=None)
+        assert ss.get()["objects"] == [{"class_name": "cup"}]
+
+    def test_explicit_empty_objects_clears_state(self):
+        """[] means 'observed zero objects' and must be representable."""
+        ss = SceneState()
+        ss.update(objects=[{"class_name": "cup"}])
+        ss.update(objects=[])
+        assert ss.get()["objects"] == []
+
     def test_get_returns_all_fields(self):
         ss = SceneState()
         state = ss.get()

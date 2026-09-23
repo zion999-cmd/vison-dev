@@ -70,3 +70,61 @@ class TestFrameDiff:
         assert diff.motion_level > 0  # a real change was measured at 4:3
         diff.changed(np.zeros((360, 640, 3), dtype=np.uint8))
         assert diff.motion_level == 0.0
+
+    def test_cached_reference_does_not_alias_caller_frame(self):
+        """FrameDiff must own the previous-frame observation it compares against."""
+        diff = FrameDiff(threshold=25, min_pixels=10)
+        frame = np.zeros((480, 640, 3), dtype=np.uint8)
+        diff.changed(frame)
+        assert not np.shares_memory(diff._prev, frame)
+
+    def test_caller_mutation_after_call_does_not_forge_a_change(self):
+        """Caller mutation after the call must not alter the cached frame.
+
+        Preview rendering draws onto the caller's frame in place after
+        changed() has cached it. While _prev was a strided view, those
+        overlays mutated the cache, so the next untouched frame looked
+        changed and reported phantom motion.
+        """
+        diff = FrameDiff(threshold=25, min_pixels=10)
+        frame_a = np.full((480, 640, 3), 128, dtype=np.uint8)
+        assert diff.changed(frame_a)
+
+        # Simulate the preview overlay drawing in place on the caller's frame.
+        frame_a[100:200, 100:200] = 0
+
+        # A fresh frame with the content changed() originally observed.
+        unchanged = np.full((480, 640, 3), 128, dtype=np.uint8)
+        assert not diff.changed(unchanged)
+        assert diff.motion_level == 0.0
+
+    def test_reset_clears_motion_level(self):
+        """reset() forgets the observation, so its motion measurement too."""
+        diff = FrameDiff(threshold=25, min_pixels=10)
+        diff.changed(np.zeros((200, 200, 3), dtype=np.uint8))
+        diff.changed(np.full((200, 200, 3), 255, dtype=np.uint8))
+        assert diff.motion_level > 0  # a real measurement exists
+        diff.reset()
+        assert diff.motion_level == 0.0
+
+    def test_observation_goes_stale_after_max_age(self):
+        """A retained observation must not be believed indefinitely."""
+        diff = FrameDiff(observation_max_age=2.0)
+        diff.mark_observed(now=1000.0)
+        assert not diff.observation_stale(now=1001.9)
+        assert diff.observation_stale(now=1002.0)
+
+    def test_fresh_observation_defers_staleness(self):
+        diff = FrameDiff(observation_max_age=2.0)
+        diff.mark_observed(now=1000.0)
+        diff.mark_observed(now=1001.5)  # re-observed before expiry
+        assert not diff.observation_stale(now=1003.0)
+        assert diff.observation_stale(now=1003.5)
+
+    def test_reset_makes_the_observation_stale(self):
+        """Forgetting the observation must force a fresh one."""
+        diff = FrameDiff(observation_max_age=2.0)
+        diff.mark_observed(now=1000.0)
+        assert not diff.observation_stale(now=1001.0)
+        diff.reset()
+        assert diff.observation_stale(now=1001.0)

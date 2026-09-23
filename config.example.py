@@ -56,6 +56,11 @@ SHOW_PREVIEW = True
 FRAME_DIFF_THRESHOLD = 25          # 像素强度差异阈值
 FRAME_DIFF_MIN_PIXELS = 500        # 最少变化像素数
 
+# 观测有效期：距上次有效检测超过此秒数即强制重新检测
+# 闸门可能因缓慢漂移（每帧变化低于阈值）长期不打开，没有这一条
+# 就无法发现"慢慢离开的人"，保留的观测会被无限期当成仍然有效。
+OBSERVATION_MAX_AGE_SEC = 2.0
+
 # ONNX 模型路径
 FACE_DETECTION_MODEL = "models/yunet.onnx"
 FACE_CONFIDENCE_THRESHOLD = 0.5

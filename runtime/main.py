@@ -323,12 +323,20 @@ class PerceptionRuntime:
 
             # YOLO is single-frame stateless — works fine during motion.
             # Frame diff is what gets polluted by PTZ (handled above).
-            if has_changed or ego_motion:
+            # Detection runs on change, during ego motion, or when the last
+            # accepted observation has gone stale. The third case matters: a
+            # person can drift out of frame so slowly that no single frame
+            # exceeds the diff threshold, and a retained observation must
+            # never be believed indefinitely.
+            if has_changed or ego_motion or self.frame_diff.observation_stale(timestamp):
                 faces = self.face.detect(frame)
                 objects = self.object_detector.detect(frame)
+                self.frame_diff.mark_observed(timestamp)
+                detection_ran = True
             else:
                 faces = []
                 objects = []
+                detection_ran = False
 
             # PTZ started moving → clear tracking state so old bboxes don't
             # persist at wrong positions after the camera pans away.
@@ -339,8 +347,9 @@ class PerceptionRuntime:
             self._poll_audio()
 
             # ── L3: Scene State + State Machine ──
-            # Get current anchor's novelty for genuine change detection
-            current_anchor_novelty = 0.0
+            # Get current anchor's novelty for genuine change detection.
+            # Stays None unless an anchor was actually sampled this frame.
+            current_anchor_novelty = None
             if objects and not ego_motion:
                 # Find anchor at current camera position
                 from runtime.interest.anchor import SpatialAnchor
@@ -353,10 +362,15 @@ class PerceptionRuntime:
                         current_anchor_novelty = a.novelty
                         break
 
+            # A frame the motion gate skipped carries no detection at all.
+            # That is "no observation", not "observed zero": forwarding [] or
+            # 0.0 here reads as "the person and the objects are gone", which
+            # releases focus, drives FOCUS→IDLE and fabricates anchor
+            # disappearances during a perfectly still scene.
             self.scene.update(
-                people=faces,
+                people=faces if detection_ran else None,
                 motion_level=motion_level,
-                objects=objects,
+                objects=objects if detection_ran else None,
                 voice_activity=self._voice_active,
                 anchor_novelty=current_anchor_novelty,
             )
@@ -423,7 +437,10 @@ class PerceptionRuntime:
             # Skip during PTZ motion AND settling (RTSP buffer still shows
             # old-angle frames for 2-3s after camera stops).
             camera_settled = not self.servo_ptz.moving
-            if camera_settled and (objects or self._frame_count % 5 == 0):
+            # Only observe an actual detection result. A frame the gate
+            # skipped has no observation to contribute, and observe([]) would
+            # report every baseline object as having disappeared.
+            if detection_ran and camera_settled and (objects or self._frame_count % 5 == 0):
                 self.anchor_manager.observe(
                     objects=objects,
                     pan=self.servo_ptz.pan,
