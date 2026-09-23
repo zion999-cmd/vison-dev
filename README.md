@@ -80,4 +80,5 @@ pytest -q                  # 全部测试必须通过
 | 浏览全部文档 | [doc/README.md](doc/README.md) |
 | 了解设计演进 | [proposals/](proposals/) (P0001–P0007) |
 | 了解开发方法论 | [interaction/README.md](interaction/README.md) |
+| 查看已知问题登记 | [context/known_issues.md](context/known_issues.md)（FIXED / OPEN-CONFIRMED / VERIFY / DEFERRED） |
 | Claude Code 开始工作 | [CLAUDE.md](CLAUDE.md) → [context/current_state.md](context/current_state.md) → [context/handoff.md](context/handoff.md) |

@@ -104,6 +104,49 @@
 - **影响**：`ego_motion` 永久为真 → 帧差闸门被跳过、`focus.reset_tracking()` 每帧执行、`camera_settled` 永远为假导致 anchor 永不观测。
 - **已由 CLAUDE.md / AGENTS.md 记录。** 已归入 Batch 2（涉及硬件 failure-state machine，风险面较大）。
 
+### `anchor.novelty` 的量纲与被比较的阈值不匹配
+- **证据**（代码审计）：`anchor.novelty` 只在 `AnchorManager.observe` 内更新，其余时间以约 10%/min 衰减（`anchor.py:197-200`），是**分钟级累积量**；而 `SceneState` 用它做**逐事件**的 latch 判定（`anchor_novelty > 0.3`，连续两帧）。
+- **影响**：相机重新访问某个锚点时读到的可能是数分钟前记下的高值 → 两帧即可 latch `desk_changed`，即使那两帧什么都没变；反之真实变化若落在已衰减到 0.3 以下的锚点上则被忽略。
+- **状态**：未修复，未复现（VERIFY→倾向 OPEN-CONFIRMED）。与已登记的 `desk_changed` 卡死项同源。
+
+### 日志轮转窗口 vs 多小时 long-run
+- **证据**（实测推算）：插桩后 OBS 行约 130 B × 5 FPS ≈ **56 MB/天**；另测得既有日志体积 ≈ **16 MB/h**（`runtime_20260921_133236.log` = 3.5 MB / 13 min），主要来自 `servo_ptz.py:185` 的每命令 INFO 行。轮转配置为 5 MB × 3 backups（`logging_config.py`）。
+- **影响**：**对本次 smoke test（每项 3–5 分钟）无影响**，远在窗口内。但对计划中的多小时 long-run，窗口仅约 1 小时，早期证据会被轮转掉。
+- **状态**：未修复。可选缓解：提高 `LOG_FILE_MAX_BYTES`，或把 OBS 探针改为边沿触发（每次 gate 结果变化才输出一行，仍可凭行内 `f=` 重建区间），或按阶段手动归档 `latest.log`。
+
+### 观测仪器覆盖不足 —— Test A 部分项与 Test C 全部无法观测
+- **证据**（代码审计，非实机）：`runtime/main.py` 的 `logger.*` 调用中，`has_changed` / `detection_ran` / `observation_stale`（forced observation）/ `user_present` / `desk_changed` / `anchor_novelty` 的提及次数**均为 0**；`runtime/interest/anchor.py` **没有任何 logger 调用**；`runtime/attention/engine.py` 只记录权重演化与 gaze 转变，不记录 `new_object` 事件。
+- **影响**：
+  - **Test A 第 1 / 2 / 4 项**（静止时 detection 不应每帧恒跑、stale 后应周期性重检、周期重检仍能确认 person）无法从日志观测
+  - **Test C 全部**（anchor hit/lookup、anchor novelty、desk_changed、new_object attention event、novelty 恢复、desk_changed 恢复）无法从日志观测
+  - 即：即使接上硬件跑完整流程，也无法为这些量产出 OBSERVED 级证据
+- **当前可观测的**（对照用）：
+
+  | 量 | 输出点 |
+  |---|---|
+  | SceneState 状态转变（含 trigger） | `scene/state.py:106` |
+  | Focus lock / release | `focus/manager.py:203,210` |
+  | gaze started / lost | `attention/engine.py:163,169` |
+  | PTZ 每条命令响应 | `perception/servo_ptz.py:185` |
+  | Revisit stay / leave 决策（tier/int/objs） | `interest/revisit.py:254-278` |
+  | Commitment 决策块 | `commitment/telemetry.py:41,58` |
+  | 每 60s 状态行 | `main.py:480` → `1022,1028` |
+  | 每分钟汇总 | `logs/telemetry/vitals_*.log` |
+
+- **状态**：**已由诊断探针解决**（`chore(runtime): instrument observation baseline`）。全部为 `logger.debug`，文件 handler 本就是 DEBUG（`logging_config.py:102,128`），控制台仍停在 `LOG_LEVEL`，因此不刷屏。新增探针：
+
+  | 探针 | 输出 | 频率 |
+  |---|---|---|
+  | `OBS` | `ran` / `reason`(motion,ego_motion,stale) / `changed` / `ego` / `stale` / face、object 计数 | 每帧 DEBUG |
+  | `SCENE` | `user_present` / `desk_changed` | **仅边沿** |
+  | `ANCHOR lookup` | `hit`/`miss` + snapped 网格 vs stored 网格 + novelty | 仅查找发生时 |
+  | `ANCHOR observe` | 传入 `observe()` 的 objects 数与 pan/tilt | 仅观测发生时 |
+  | `ATTENTION new_object` | score / detail / intention | 仅事件实际产生时 |
+
+  `ran=false` = NOT OBSERVED；`ran=true` 且计数为 0 = OBSERVED with zero results —— 两者可区分。
+
+  **仍不可观测**：`FrameDiff` 逐帧 `motion_level`、detector 的置信度分布、anchor 被跳过未观测的帧。日志体积影响见下一条。
+
 ---
 
 ## VERIFY

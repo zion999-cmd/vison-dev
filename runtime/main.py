@@ -185,6 +185,12 @@ class PerceptionRuntime:
         self._last_state = ""
         self._last_behavior = ""
 
+        # Diagnostic support for Hardware Baseline Smoke Test: cursors for the
+        # edge-triggered SCENE probes. Written and read only by the DEBUG
+        # probes; never consulted by a runtime decision.
+        self._diag_user_present = False
+        self._diag_desk_changed = False
+
     # ══════════════════════════════════════════════════
     # Lifecycle
     # ══════════════════════════════════════════════════
@@ -328,7 +334,11 @@ class PerceptionRuntime:
             # person can drift out of frame so slowly that no single frame
             # exceeds the diff threshold, and a retained observation must
             # never be believed indefinitely.
-            if has_changed or ego_motion or self.frame_diff.observation_stale(timestamp):
+            # `observation_stale` is a pure predicate over FrameDiff's
+            # observation age, evaluated once so the diagnostic line below can
+            # reuse it without a second call.
+            observation_stale = self.frame_diff.observation_stale(timestamp)
+            if has_changed or ego_motion or observation_stale:
                 faces = self.face.detect(frame)
                 objects = self.object_detector.detect(frame)
                 self.frame_diff.mark_observed(timestamp)
@@ -337,6 +347,24 @@ class PerceptionRuntime:
                 faces = []
                 objects = []
                 detection_ran = False
+
+            # Diagnostic support for Hardware Baseline Smoke Test. File-only:
+            # DEBUG goes to the log file while the console stays at LOG_LEVEL.
+            # Observes existing values only — calls nothing.
+            #   ran=false            → NOT OBSERVED (detection skipped)
+            #   ran=true, counts 0   → OBSERVED with zero results
+            reasons = ",".join(
+                name for name, hit in (
+                    ("motion", has_changed),
+                    ("ego_motion", ego_motion),
+                    ("stale", observation_stale),
+                ) if hit
+            ) or "none"
+            logger.debug(
+                "OBS f=%d ran=%s reason=%s changed=%s ego=%s stale=%s faces=%d objects=%d",
+                self._frame_count, detection_ran, reasons,
+                has_changed, ego_motion, observation_stale, len(faces), len(objects),
+            )
 
             # PTZ started moving → clear tracking state so old bboxes don't
             # persist at wrong positions after the camera pans away.
@@ -357,10 +385,20 @@ class PerceptionRuntime:
                 tilt = self.servo_ptz.tilt
                 snapped_pan = round(pan / 30.0) * 30.0
                 snapped_tilt = round(tilt / 15.0) * 15.0
-                for a in self.anchor_manager.all_anchors():
+                anchors = self.anchor_manager.all_anchors()  # captured once
+                for a in anchors:
                     if abs(a.pan - snapped_pan) < 1 and abs(a.tilt - snapped_tilt) < 1:
                         current_anchor_novelty = a.novelty
+                        # Diagnostic: snapped vs stored grid exposes the
+                        # AnchorManager(panspacing=20) / 30° lookup mismatch.
+                        logger.debug(
+                            "ANCHOR lookup=hit snapped=(%.0f,%.0f) stored=(%.1f,%.1f) novelty=%.3f",
+                            snapped_pan, snapped_tilt, a.pan, a.tilt, a.novelty)
                         break
+                else:
+                    logger.debug(
+                        "ANCHOR lookup=miss snapped=(%.0f,%.0f) anchors=%d",
+                        snapped_pan, snapped_tilt, len(anchors))
 
             # A frame the motion gate skipped carries no detection at all.
             # That is "no observation", not "observed zero": forwarding [] or
@@ -384,6 +422,17 @@ class PerceptionRuntime:
             intention_result = self.intention.infer(raw_state, scored_events)
             self.scene.update(intention=intention_result["intention"])
             scene_state = self.scene.get()
+
+            # Diagnostic support for Hardware Baseline Smoke Test — edge-only,
+            # so a still scene never repeats these at INFO.
+            if scene_state["user_present"] != self._diag_user_present:
+                self._diag_user_present = scene_state["user_present"]
+                logger.debug("SCENE user_present=%s f=%d",
+                             self._diag_user_present, self._frame_count)
+            if scene_state["desk_changed"] != self._diag_desk_changed:
+                self._diag_desk_changed = scene_state["desk_changed"]
+                logger.debug("SCENE desk_changed=%s f=%d",
+                             self._diag_desk_changed, self._frame_count)
 
             # ── Focus System + Presence ──
             focus_info = self.focus.update(scored_events, scene_state, faces, objects)
@@ -419,6 +468,11 @@ class PerceptionRuntime:
 
             # ── L5: Memory ──
             for ev in scored_events:
+                # Diagnostic: observes the existing event, adds no new one.
+                if ev["type"] == "new_object":
+                    logger.debug("ATTENTION new_object score=%.2f detail=%s intention=%s",
+                                 ev["score"], ev.get("detail", ""),
+                                 intention_result["intention"])
                 effective = ATTENTION_THRESHOLD * self.scene.attention_multiplier
                 if ev["score"] >= effective:
                     self.memory.push(
@@ -441,11 +495,18 @@ class PerceptionRuntime:
             # skipped has no observation to contribute, and observe([]) would
             # report every baseline object as having disappeared.
             if detection_ran and camera_settled and (objects or self._frame_count % 5 == 0):
+                # Read the pose once so the diagnostic line reports exactly
+                # the values observe() received (the PTZ worker thread can
+                # update them between two reads).
+                observe_pan, observe_tilt = self.servo_ptz.pan, self.servo_ptz.tilt
                 self.anchor_manager.observe(
                     objects=objects,
-                    pan=self.servo_ptz.pan,
-                    tilt=self.servo_ptz.tilt,
+                    pan=observe_pan,
+                    tilt=observe_tilt,
                 )
+                logger.debug("ANCHOR observe f=%d objects=%d pan=%s tilt=%s",
+                             self._frame_count, len(objects),
+                             observe_pan, observe_tilt)
 
             # ── Entity Registry ──
             if objects:

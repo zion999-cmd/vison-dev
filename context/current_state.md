@@ -49,3 +49,9 @@
 
 - **Baseline Integrity Gate 未通过**：仍有 OPEN-CONFIRMED 行为缺陷未修复（见 [known_issues.md](known_issues.md)），
   其中 4 项直接影响 P0008.1 长测的自变量。硬件长测暂不启动。
+- **Hardware baseline smoke test = INCONCLUSIVE**：硬件在位（Arduino `/dev/tty.usbserial-A600J5V6`、
+  摄像头索引 0/1 可打开），但 Test A/B/C 需要用户的物理动作（进入画面/静止/离开/放置物体），
+  本轮未执行。审计发现仪器覆盖不足的项已由诊断探针补上（见下）。
+- 诊断探针（`OBS` / `SCENE` / `ANCHOR lookup` / `ANCHOR observe` / `ATTENTION new_object`）
+  已就位，**全部为 DEBUG、文件-only、行为中立**，仅用于 Hardware Baseline Smoke Test 的证据采集；
+  这不是新的 runtime capability。等用户执行实机 smoke test。
