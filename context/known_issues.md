@@ -18,10 +18,11 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **281 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
-| Hardware baseline | **NOT validated** —— 本会话所有结论均来自单元测试与受控复现，未在实机运行验证 |
+| Code regression | **289 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
+| Hardware baseline | **FAIL**（`runtime_20260924_071532.log`：Test A 通过、Test B **未覆盖**、Test C 暴露 BI-10/BI-11 两条缺陷）|
+| 实机运行 | 1 次：2026-09-24 07:15:32 → 07:28:46，3873 帧，13m14s，优雅退出 |
 | 分支 | `fix/frame-diff-and-dead-code` |
-| 已提交前序 | `73f8ac4` `21d7d47` `ad77f22` |
+| 已提交前序 | `73f8ac4` `21d7d47` `ad77f22` `7e7a5ff` `f4d8879` |
 
 ---
 
@@ -73,20 +74,33 @@
 - **影响**：防抖是**时间驱动**的，却被关在 `if people is not None:` 里。修复后 `user_left` 正常触发（原本要等 30s 的 `_STATE_TIMEOUTS` 兜底，且 attention 会在更敏感的 FOCUS 档多停留 10 倍时间）。
 - **状态**：本 commit
 
+### BI-10 — `desk_changed` 永久卡死（novelty 生命周期）
+- **HARDWARE OBSERVED**（`runtime_20260924_071532.log`，3873 帧 / 13m14s）：`desk_changed` @07:18:18(f=791) 置 True 后**到运行结束（10.5 分钟）再无下降沿**；同期 `ATTENTION new_object` 共 **3695 次**，约 **5 次/秒（≈每帧）**
+- **根因（两处）**：
+  1. `AnchorManager.observe` 的 "first observation" 提前返回以 `not anchor.baseline_objects` 为条件 —— baseline 合法变空后会**永远**重入该分支并 return，`else` 衰减分支不可达，novelty 冻结在峰值（实测冻结于 0.480）；顺带使 `_empty_streak`/`barren` 也永不置位
+  2. `main.py` 的 novelty 读取要求 `objects` 非空 —— 桌上无物体时永远传 `None`，即使 novelty 衰减了也到不了消费者
+- **修复**：`SpatialAnchor` 增加 `observed_once` 标志，提前返回只用于真正的首次观测；novelty 读取条件由 `objects and not ego_motion` 改为 `detection_ran and not ego_motion`（空检测是**有效观测**）
+- **未采用**：不给 `desk_changed` 加人工 timeout、不改 attention threshold、不做 `new_object` 去重、**保留"物体消失本身可产生 novelty"语义**
+- **证据（测试）**：`test_stable_empty_eventually_decays`、`test_object_appearing_raises_novelty`、`test_desk_changed_latches_then_clears_on_a_settled_desk` 在修复前失败、修复后通过
+- **状态**：**FIXED（代码）—— 待实机复验**
+
+### BI-11 — Anchor 空间网格不一致
+- **HARDWARE OBSERVED**（同上日志）：`ANCHOR lookup` **322 hit / 1777 miss = 15.3% 命中率**；miss 全部集中在 `snapped=90`（1283 次）与 `snapped=150`（428 次）—— 正是 20° 网格与 30° 网格的中点（80/100 与 90、140/160 与 150 各差 10°），只有 0/60/120 两网格重合才命中
+- **根因**：`AnchorManager(pan_spacing=20)`，而调用方 `main.py` 自行实现 `round(pan/30)*30` 的 snap + `abs(...) < 1` 容差匹配
+- **修复**：`AnchorManager` 新增 `snap()` / `lookup()` 作为**唯一** canonical 网格语义；删除调用方自实现的 30° snap 与容差循环，改为 `lookup()`（dict 键精确命中，**未扩大容差**）
+- **未改变**：novelty 算法、阈值、衰减率
+- **证据（测试）**：`TestCanonicalGrid` 三个用例；`test_lookup_resolves_poses_the_30_degree_snap_missed` 直接断言 `snap(90,92) == (80,90)` 且 `lookup(90,92)` 命中
+- **状态**：**FIXED（代码）—— 待实机复验**（实机验证指标：下一次运行的 `ANCHOR lookup` 命中率应显著高于 15.3%）
+
 ---
 
 ## OPEN-CONFIRMED
 
-### `desk_changed` 在"桌上无物体"时永久卡住
-- **证据**：复现 —— latch 后 50 帧仍为 `True`；novelty 在 baseline 变空后被冻结在 0.480（`anchor.py:167-172` 的 "first observation" 提前返回使衰减分支永不执行），而 `main.py` 的 novelty 读取要求 `objects` 非空 → 永远传 `None` → 无释放路径。
-- **影响**：attention 每帧发 `new_object`（0.65 基数 ≥ 有效阈值 0.42）→ 200 条 L5 EpisodicMemory 被重复条目淹没；`presence.novelty` 被钉在 0.3。
-- **归属**：BI-03 使其**可达**，BI-07/Batch 1 移除了原先（偶然的）清除路径。
-- **修复需要决策**：novelty 在 baseline 为空时的语义（AnchorManager 侧），不是本地修正。
-
-### `AnchorManager` 的 pan 网格与 novelty 查找网格不一致
-- **证据**：代码确认 —— `main.py:131` 构造 `AnchorManager(pan_spacing=20, tilt_spacing=15)`，而 `main.py:358` 的 novelty 查找把当前 pan snap 到 **30°** 网格。anchors 存在 20° 网格上，故仅在 60 的倍数附近（约 27% 的 pan 位置）可能命中。
-- **影响**：anchor-novelty 路径在大部分 pan 位置静默失效 → `desk_changed` 很难 latch。
-- **归属**：既存（两个常量均在 HEAD）。
+### PTZ 外层 8s gate 压制内层 1.5s tracking
+- **HARDWARE OBSERVED**（同上日志）：PTZ 命令全程仅 **53 条**（27 pan + 26 tilt）/794s ≈ 4/min；跟踪期间隔 **~8–9s**，其后出现 **114s / 162s / 255s** 的空档
+- **根因（INFERRED，代码 + 节奏一致）**：`revisit.py:56` `self.revisit_interval = 8.0`，`tick()` 在 `revisit.py:140` 早退；而 `_track_target` 的**全部**调用点（251/299/410/464）都在该闸门之后，于是内层 `revisit.py:82` `_track_interval = 1.5` 被完全支配 → 有效跟踪更新率 ≈ 8s，比设计慢约 5 倍
+- **影响**：用户主观观察"PTZ 跟踪有时反应偏慢"的直接来源。次要贡献：**YuNet 在 30% 的检测帧漏检人脸**（2149 检测帧中 638 帧 faces=0 但 objects≥1），而 `_track_target` 需要 face 或 YOLO person 才能算偏移
+- **未修复**（本轮明确不处理 PTZ）
 
 ### `RevisitController._last_track_hit` 在静止期不刷新
 - **证据**：代码路径 —— `revisit.py:610` 是唯一写入点，位于 `_track_target` 内，而该函数在 `faces`/`objects` 皆空时提前返回；`revisit.py:227` 以 `< 15.0` 判 `has_life`。
@@ -198,11 +212,14 @@
 
 ## 关于 P0008.1 长测的前置提示
 
-以下 OPEN-CONFIRMED 项会直接影响长测的自变量，建议在进入长测前决定：
+以下项会直接影响长测的自变量：
 
-1. `desk_changed` 永久卡住 → L5 记忆被重复 `new_object` 淹没
-2. attention 电平触发 → 重复 `human_face` 进入 L5
-3. `_last_track_hit` 静止期不刷新 → 可能主动离开一个不动的人
-4. `AnchorManager` 20°/30° 网格不一致 → novelty 路径大部分 pan 位置失效
+1. ~~`desk_changed` 永久卡住 → L5 记忆被重复 `new_object` 淹没~~ —— **BI-10 已修（待实机复验）**
+2. attention 电平触发 → 重复 `human_face` 进入 L5（OPEN-CONFIRMED，既存设计；实机 `ATTENTION new_object` 与 `human_face` 均≈每帧）
+3. `_last_track_hit` 静止期不刷新 → 可能主动离开一个不动的人（OPEN-CONFIRMED）
+4. ~~`AnchorManager` 20°/30° 网格不一致~~ —— **BI-11 已修（待实机复验）**
+5. **PTZ 外层 8s gate 压制 1.5s tracking** → 跟踪更新率比设计慢约 5 倍（OPEN-CONFIRMED，实机观测；本轮未修）
+
+**Test B（真实离开）仍为 Pending Validation** —— 2026-09-24 那次运行用户在末尾 5.7 分钟持续在场（`faces=1` × 1152 帧），没有发生离开，离开路径未获实机验证。
 
 **本文件不预设修复顺序；分类与优先级由 Known-Issue Triage 决定。**

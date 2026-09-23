@@ -166,6 +166,48 @@ def test_explicit_zero_novelty_still_resets_the_streak():
     assert scene.get()["desk_changed"] is False
 
 
+# ── F. desk_changed lifecycle over the real AnchorManager ──
+
+def test_desk_changed_latches_then_clears_on_a_settled_desk():
+    """Hardware regression: desk_changed latched at 07:18:18 and was still
+    True 10.5 minutes later, emitting new_object ~every frame (3695 events).
+    A settled desk — whether empty or not — must let the anchor's novelty
+    decay back down, and main.py must keep reading it so the flag clears.
+    """
+    from runtime.interest.anchor import AnchorManager
+
+    manager = AnchorManager(pan_spacing=20, tilt_spacing=15)
+    pan, tilt = 78, 92                      # canonical cell (80, 90)
+    cup = [{"class_name": "cup", "confidence": 0.9}]
+    scene = SceneState()
+
+    def observe_and_publish(objects):
+        """One production frame: observe the anchor, then read its novelty
+        the way main.py does (an empty detection is still an observation)."""
+        manager.observe(objects, pan=pan, tilt=tilt)
+        anchor = manager.lookup(pan, tilt)
+        scene.update(objects=objects,
+                     anchor_novelty=anchor.novelty if anchor else None)
+        scene.update(intention="ambient")
+
+    # The cup leaves → the anchor's novelty rises above the latch threshold.
+    manager.observe(cup, pan=pan, tilt=tilt)
+    for _ in range(3):
+        manager.observe([], pan=pan, tilt=tilt)
+    assert manager.lookup(pan, tilt).novelty > 0.3
+
+    observe_and_publish([])                 # first frame only counts
+    observe_and_publish([])                 # second frame latches
+    assert scene.get()["desk_changed"] is True
+
+    # The desk stays empty. Nothing new happens, so novelty must decay.
+    for _ in range(80):
+        observe_and_publish([])
+
+    assert manager.lookup(pan, tilt).novelty <= 0.3
+    assert scene.get()["desk_changed"] is False, "a settled desk must release the flag"
+
+
 # ── E. Long stillness: what actually recovers detection ──
 
 def test_gate_alone_cannot_recover_from_sub_threshold_drift():

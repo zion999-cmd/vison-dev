@@ -10,8 +10,8 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **281 passed, 0 failed**（`conda run -n vision-dev python -m pytest -q`） |
-| Hardware baseline | **NOT validated** —— 当前所有结论均来自单元测试与受控复现，未在实机运行验证 |
+| Code regression | **289 passed, 0 failed**（`conda run -n vision-dev python -m pytest -q`） |
+| Hardware baseline | **FAIL**（2026-09-24 实机运行：Test A 通过 / Test B 未覆盖 / Test C 暴露 BI-10、BI-11）—— 两条已修，**待实机复验** |
 | 分支 | `fix/frame-diff-and-dead-code`（未 merge、未 push） |
 
 已发现问题的完整登记（FIXED / OPEN-CONFIRMED / VERIFY / DEFERRED）见 [known_issues.md](known_issues.md)。

@@ -376,29 +376,25 @@ class PerceptionRuntime:
 
             # ── L3: Scene State + State Machine ──
             # Get current anchor's novelty for genuine change detection.
-            # Stays None unless an anchor was actually sampled this frame.
+            # Stays None unless this frame carries a valid observation at a
+            # known pose. An empty detection counts: the anchor's decaying
+            # novelty is what tells SceneState that a desk change has settled
+            # back down, so it must still be read once the objects have gone.
+            # Lookup goes through AnchorManager's canonical grid — the caller
+            # must not re-implement the snap with a different spacing.
             current_anchor_novelty = None
-            if objects and not ego_motion:
-                # Find anchor at current camera position
-                from runtime.interest.anchor import SpatialAnchor
+            if detection_ran and not ego_motion:
                 pan = self.servo_ptz.pan
                 tilt = self.servo_ptz.tilt
-                snapped_pan = round(pan / 30.0) * 30.0
-                snapped_tilt = round(tilt / 15.0) * 15.0
-                anchors = self.anchor_manager.all_anchors()  # captured once
-                for a in anchors:
-                    if abs(a.pan - snapped_pan) < 1 and abs(a.tilt - snapped_tilt) < 1:
-                        current_anchor_novelty = a.novelty
-                        # Diagnostic: snapped vs stored grid exposes the
-                        # AnchorManager(panspacing=20) / 30° lookup mismatch.
-                        logger.debug(
-                            "ANCHOR lookup=hit snapped=(%.0f,%.0f) stored=(%.1f,%.1f) novelty=%.3f",
-                            snapped_pan, snapped_tilt, a.pan, a.tilt, a.novelty)
-                        break
+                anchor = self.anchor_manager.lookup(pan, tilt)
+                if anchor is not None:
+                    current_anchor_novelty = anchor.novelty
+                    logger.debug("ANCHOR lookup=hit pose=(%s,%s) anchor=%s novelty=%.3f",
+                                 pan, tilt, anchor.anchor_id, anchor.novelty)
                 else:
-                    logger.debug(
-                        "ANCHOR lookup=miss snapped=(%.0f,%.0f) anchors=%d",
-                        snapped_pan, snapped_tilt, len(anchors))
+                    cell = self.anchor_manager.snap(pan, tilt)
+                    logger.debug("ANCHOR lookup=miss pose=(%s,%s) cell=(%.0f,%.0f) anchors=%d",
+                                 pan, tilt, cell[0], cell[1], self.anchor_manager.anchor_count)
 
             # A frame the motion gate skipped carries no detection at all.
             # That is "no observation", not "observed zero": forwarding [] or

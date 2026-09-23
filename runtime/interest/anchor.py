@@ -44,6 +44,14 @@ class SpatialAnchor:
     last_visited: float = 0.0
     visit_count: int = 0
 
+    # True once observe() has established a baseline for this anchor.
+    # Distinguishes "never observed" from "observed, and the baseline is
+    # legitimately empty". Keyed on baseline emptiness instead, an anchor
+    # whose objects all left would re-enter the first-observation path on
+    # every later observation and return early — so novelty could never decay
+    # and the anchor could never be marked barren.
+    observed_once: bool = False
+
     # Interest — driven by CHANGES from baseline
     interest: float = 0.3       # base interest in any observed location
     uncertainty: float = 0.0    # grows with time since last visit
@@ -166,7 +174,8 @@ class AnchorManager:
             anchor = self._get_or_create_anchor_locked(pan, tilt)
 
             # First observation: establish baseline
-            if not anchor.baseline_objects:
+            if not anchor.observed_once:
+                anchor.observed_once = True
                 anchor.baseline_objects = current_classes.copy()
                 anchor.common_objects = sorted(current_classes)[:5]
                 anchor.last_seen = time.time()
@@ -311,6 +320,22 @@ class AnchorManager:
     def all_anchors(self) -> List[SpatialAnchor]:
         with self._lock:
             return list(self._anchors.values())
+
+    # ── Canonical spatial discretization ──
+    # These two are the ONLY definition of the pan/tilt grid. A caller that
+    # re-implements the snap with different spacings silently misses every
+    # anchor that falls between the two grids (observed on hardware: a 30°
+    # caller-side snap against this 20° grid hit only 322 of 2099 lookups).
+
+    def snap(self, pan: float, tilt: float) -> Tuple[float, float]:
+        """The canonical grid cell a pose belongs to."""
+        return (self._snap(pan, self._pan_spacing),
+                self._snap(tilt, self._tilt_spacing))
+
+    def lookup(self, pan: float, tilt: float) -> Optional[SpatialAnchor]:
+        """The anchor at this pose's canonical cell, or None if never observed."""
+        with self._lock:
+            return self._anchors.get(self._anchor_key(pan, tilt))
 
     @property
     def anchor_count(self) -> int:
