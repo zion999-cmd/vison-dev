@@ -16,6 +16,7 @@ from typing import Optional
 from runtime.interest.verifier import VLMVerifier, Verdict
 from runtime.commitment.engine import CommitmentEngine, Decision, PRESENCE_WINDOW
 from runtime.commitment.telemetry import CommitmentTelemetry
+from runtime.perception.ptz_motion import PtzMotion
 
 logger = logging.getLogger("Interest.Revisit")
 
@@ -44,6 +45,8 @@ class RevisitController:
                  on_decision=None, role_engine=None):
         self._engine = interest_engine
         self._servo_ptz = servo_ptz
+        # Sole movement writer: every pan/tilt move below goes through it.
+        self._motion = PtzMotion(servo_ptz)
         self._camera_state = camera_state
         self._object_detector = object_detector
         self._face_detector = face_detector
@@ -146,6 +149,10 @@ class RevisitController:
         # Idle, revisit and sweep still run on the revisit cadence below.
         if faces or objects:
             self._track_target(now)
+
+        # Advance pending movement every frame, not only when the revisit gate
+        # opens — otherwise a rate-limited move would stall between decisions.
+        self._motion.step(now)
 
         if now - self._last_revisit < self.revisit_interval:
             return
@@ -303,7 +310,7 @@ class RevisitController:
                                 logger.info("Tilt recovery: %d°→120° (was high for %.0fs)",
                                             self._servo_ptz.tilt,
                                             now - self._last_tilt_recovery)
-                                self._servo_ptz.tilt_to(120)
+                                self._motion.wear_protect(120)
                                 self._last_tilt_recovery = now
                             # Track target while staying — keep person/object centered
                             self._track_target(now)
@@ -322,8 +329,16 @@ class RevisitController:
             deg = self._SWEEP_SEQUENCE[self._sweep_idx % len(self._SWEEP_SEQUENCE)]
             self._sweep_idx += 1
             direction = 'left' if deg < 0 else 'right'
-            self._servo_ptz.tilt_to(95)  # explore at level, not tracking tilt
-            self._turn(direction, abs(deg))
+            # Explore at level, not at tracking tilt — but only when nothing
+            # has been tracked recently. Levelling the tilt while a target is
+            # still around yanks it away from the follow, and the ~29° it then
+            # has to re-correct through a ±8° clamp saturates for 3-4 commands
+            # every cycle. Detection misses leave multi-second gaps inside a
+            # follow, so the motion layer's short ownership hold is not enough
+            # on its own; use the existing presence window.
+            if now - self._last_track_hit >= PRESENCE_WINDOW:
+                self._motion.explore(now, tilt=95)
+            self._turn(direction, abs(deg), now)
             self._last_turn_direction = direction
             self._last_move = now
             self._staying_since = 0.0
@@ -422,14 +437,17 @@ class RevisitController:
             if now - self._last_move > 20.0:
                 pan = self._servo_ptz.pan
                 # Exploration should be level (t95), not at tracking tilt
-                self._servo_ptz.tilt_to(95)
+                # Same guard as the sweep: only level the tilt when nothing
+                # has been tracked recently (see the sweep path above).
+                if now - self._last_track_hit >= PRESENCE_WINDOW:
+                    self._motion.explore(now, tilt=95)
                 # ── Prefer returning to best anchor (skips boring idle loops) ──
                 if (self._best_anchor_interest > 0.25
                         and abs(self._best_anchor_pan - pan) > 15):
                     d_pan = self._best_anchor_pan - pan
                     direction = 'left' if d_pan < 0 else 'right'
                     deg = min(abs(int(d_pan)), 60)
-                    self._turn(direction, deg)
+                    self._turn(direction, deg, now)
                     self._last_move = now
                     self._staying_since = 0.0
                     self._staying_at_anchor = None
@@ -451,7 +469,7 @@ class RevisitController:
                 # Pick degrees from sweep sequence, cycling
                 deg = abs(self._SWEEP_SEQUENCE[self._sweep_idx % len(self._SWEEP_SEQUENCE)])
                 self._sweep_idx += 1
-                self._turn(direction, deg)
+                self._turn(direction, deg, now)
                 self._last_turn_direction = direction
                 self._last_move = now
                 self._staying_since = 0.0
@@ -670,10 +688,14 @@ class RevisitController:
         # Attention span: tracking hit
         self._attn_hit()
 
-        if pan_delta != 0:
-            self._servo_ptz.pan_relative(pan_delta)
-        if tilt_delta != 0:
-            self._servo_ptz.tilt_to(self._servo_ptz.tilt + tilt_delta)
+        # Tracking owns both axes for TRACK_HOLD_SEC after this request, so
+        # exploration cannot turn away mid-follow. The layer walks the
+        # setpoints in rate-limited steps.
+        self._motion.track(
+            now,
+            pan=self._servo_ptz.pan + pan_delta if pan_delta else None,
+            tilt=self._servo_ptz.tilt + tilt_delta if tilt_delta else None,
+        )
 
     # ── Attention Span ──
 
@@ -769,13 +791,18 @@ class RevisitController:
         except Exception:
             pass  # telemetry must never crash the main loop
 
-    def _turn(self, direction: str, degrees: int):
-        """Turn camera left or right by N degrees via servo pan."""
+    def _turn(self, direction: str, degrees: int, now: float):
+        """Turn camera left or right by N degrees via servo pan.
+
+        Exploration move: dropped while tracking holds the axes, and walked
+        in rate-limited steps by the motion layer rather than issued as one
+        long sweep.
+        """
         if direction == 'left':
             delta = -abs(degrees)
         else:
             delta = abs(degrees)
-        self._servo_ptz.pan_relative(delta)
+        self._motion.explore_pan_by(delta, now)
 
     def _confirm_anchor(self, anchor):
         """After PTZ settles at an anchor point, observe and update baseline.

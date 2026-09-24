@@ -28,7 +28,8 @@ def build():
 
 
 def commanded(servo):
-    return servo.pan_relative.called or servo.tilt_to.called
+    """Any emitted movement: the motion layer writes via pan_to/tilt_to."""
+    return servo.pan_to.called or servo.tilt_to.called
 
 
 # ── Tracking: decoupled from the revisit gate ──
@@ -40,7 +41,7 @@ def test_tracking_does_not_wait_out_the_revisit_interval():
 
     ctrl.tick(now, faces=FACE_OFF_CENTRE, objects=[])
 
-    assert servo.pan_relative.called, \
+    assert servo.pan_to.called, \
         "a visible target must be aimed at on the track interval, not after the revisit gate"
 
 
@@ -60,12 +61,12 @@ def test_tracking_still_honours_the_track_interval():
     ctrl, servo = build()
     ctrl._last_revisit = 1000.0
     ctrl.tick(1000.0, faces=FACE_OFF_CENTRE, objects=[])
-    assert servo.pan_relative.call_count == 1
+    assert servo.pan_to.call_count == 1
 
     servo.moving = False
     ctrl.tick(1001.0, faces=FACE_OFF_CENTRE, objects=[])   # only 1.0s later
 
-    assert servo.pan_relative.call_count == 1, \
+    assert servo.pan_to.call_count == 1, \
         "one command per _track_interval at most"
 
 
@@ -73,12 +74,12 @@ def test_tracking_resumes_once_the_track_interval_elapses():
     ctrl, servo = build()
     ctrl._last_revisit = 1000.0
     ctrl.tick(1000.0, faces=FACE_OFF_CENTRE, objects=[])
-    assert servo.pan_relative.call_count == 1
+    assert servo.pan_to.call_count == 1
 
     servo.moving = False
     ctrl.tick(1001.6, faces=FACE_OFF_CENTRE, objects=[])
 
-    assert servo.pan_relative.call_count == 2
+    assert servo.pan_to.call_count == 2
 
 
 def test_no_command_while_the_camera_is_moving():
