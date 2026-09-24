@@ -137,6 +137,16 @@ class RevisitController:
                 self._pending_legacy = None
                 self._confirm(target)
 
+        # ── Track a visible target on its own cadence ──
+        # Aiming must not wait out the revisit gate: with a target in view the
+        # camera has to answer in _track_interval, not in revisit_interval.
+        # _track_target keeps its own 1.5s interval and its own "camera busy"
+        # guard, and it returns immediately when no face/person is in view, so
+        # this only shortens the cadence while something is actually tracked.
+        # Idle, revisit and sweep still run on the revisit cadence below.
+        if faces or objects:
+            self._track_target(now)
+
         if now - self._last_revisit < self.revisit_interval:
             return
 
