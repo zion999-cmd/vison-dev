@@ -14,6 +14,7 @@ read from environment variables (recommended):
     export EZVIZ_RTSP_URL=rtsp://user:pass@192.168.x.x:554/...
     export DASHSCOPE_API_KEY=sk-...
     export GATEWAY_QWEN_API_KEY=sk-...
+    export ARK_PLAN_API_KEY=...      # L6 文字 LLM（火山方舟 Agent Plan）
 """
 
 import os
@@ -114,13 +115,12 @@ MEMORY_CONTEXT_EVENTS = 5          # 注入 LLM 上下文的事件数
 # L6: Cognition / API
 # ═══════════════════════════════════════════════════════════════
 
-# --- 文字 LLM（火山方舟 Agent Plan，与 Hermes 同一 provider）---
-# 协议：OpenAI 兼容 chat_completions。原为本地 oc2api http://127.0.0.1:31498/v1。
-# key 走环境变量 ARK_PLAN_API_KEY（等价于 Hermes 的 provider 配置），不进仓库。
-TEXT_API_BASE = os.environ.get("ARK_PLAN_BASE_URL",
-                               "https://ark.cn-beijing.volces.com/api/plan/v3")
+# --- 文字 LLM（火山方舟 Agent Plan —— Hermes 当前默认 provider 配置）---
+# provider=volcengine-plan / model=ark-code-latest / OpenAI 兼容 chat_completions。
+# base_url 与 model 固定为 Hermes 当前默认，不提供覆盖入口；仅 key 走环境变量。
+TEXT_API_BASE = "https://ark.cn-beijing.volces.com/api/plan/v3"
 TEXT_API_KEY = os.environ.get("ARK_PLAN_API_KEY", "")
-TEXT_MODEL = os.environ.get("ARK_PLAN_MODEL", "ark-code-latest")
+TEXT_MODEL = "ark-code-latest"
 
 # --- 视觉 VLM（多后端轮询）---
 VLM_BACKENDS = [
