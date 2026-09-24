@@ -12,7 +12,6 @@ read from environment variables (recommended):
     export EZVIZ_APP_SECRET=...
     export EZVIZ_ACCESS_TOKEN=...
     export EZVIZ_RTSP_URL=rtsp://user:pass@192.168.x.x:554/...
-    export DASHSCOPE_API_KEY=sk-...
     export GATEWAY_QWEN_API_KEY=sk-...
     export ARK_PLAN_API_KEY=...      # L6 文字 LLM（火山方舟 Agent Plan）
 """
@@ -122,10 +121,8 @@ TEXT_API_BASE = "https://ark.cn-beijing.volces.com/api/plan/v3"
 TEXT_API_KEY = os.environ.get("ARK_PLAN_API_KEY", "")
 TEXT_MODEL = "ark-code-latest"
 
-# --- 视觉 VLM（多后端轮询）---
+# --- 视觉 VLM（本地 zero-token 网关）---
 VLM_BACKENDS = [
-    {"base_url": "https://dashscope.aliyuncs.com/compatible-mode",
-        "api_key": os.environ.get("DASHSCOPE_API_KEY", ""), "model": "qwen3.6-plus"},
     {"base_url": "http://127.0.0.1:3001",
         "api_key": os.environ.get("GATEWAY_QWEN_API_KEY", ""), "model": "qwen-web/qwen-chat"},
 ]
