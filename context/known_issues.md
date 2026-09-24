@@ -18,11 +18,11 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **289 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
-| Hardware baseline | **FAIL**（`runtime_20260924_071532.log`：Test A 通过、Test B **未覆盖**、Test C 暴露 BI-10/BI-11 两条缺陷）|
-| 实机运行 | 1 次：2026-09-24 07:15:32 → 07:28:46，3873 帧，13m14s，优雅退出 |
-| 分支 | `fix/frame-diff-and-dead-code` |
-| 已提交前序 | `73f8ac4` `21d7d47` `ad77f22` `7e7a5ff` `f4d8879` |
+| Code regression | **320 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
+| Hardware baseline | **PARTIAL**：2026-09-24 07:15 那次 Test A 通过 / Test B **未覆盖** / Test C 暴露 BI-10、BI-11（两条已修，待复验）；**PTZ 部分 PASSED** —— 2026-09-24 14:03 实机 A/B 对照，见 BI-14 |
+| 实机运行 | 3 次：07:15:32（13m14s，3873 帧）、14:03:34（7m01s，2060 帧，新代码）、14:11:47（7m03s，2076 帧，HEAD 对照） |
+| 分支 | `fix/frame-diff-and-dead-code`（未 merge、未 push） |
+| 已提交前序 | `73f8ac4` `21d7d47` `ad77f22` `7e7a5ff` `f4d8879` `92a99bb` `0e061e9` `feec2bc` `94dd360` `557ec9f` `c9593a8` |
 
 ---
 
@@ -92,15 +92,72 @@
 - **证据（测试）**：`TestCanonicalGrid` 三个用例；`test_lookup_resolves_poses_the_30_degree_snap_missed` 直接断言 `snap(90,92) == (80,90)` 且 `lookup(90,92)` 命中
 - **状态**：**FIXED（代码）—— 待实机复验**（实机验证指标：下一次运行的 `ANCHOR lookup` 命中率应显著高于 15.3%）
 
+### BI-12 — PTZ 外层 8s gate 压制内层 1.5s tracking
+- **HARDWARE OBSERVED**（`runtime_20260924_071532.log`）：PTZ 命令全程仅 **53 条**（27 pan + 26 tilt）/794s ≈ 4/min；跟踪期间隔 **~8–9s**，其后出现 **114s / 162s / 255s** 空档
+- **根因（代码 + 节奏一致）**：`revisit_interval = 8.0`，`tick()` 早退，而 `_track_target` 的**全部**调用点都在该闸门之后 → 内层 `_track_interval = 1.5` 被完全支配
+- **修复**：`tick()` 在 revisit 闸门之前先跑跟踪更新；`_track_target` 保留自己的 1.5s 间隔与 camera-busy 守卫。**两个间隔参数值均未改动**，idle / revisit / sweep 仍在 8s 节奏
+- **证据（实机）**：tracking 命令间隔 median **8s → 2s**，≤4s 占比 14% → 76%
+- **提交**：`557ec9f`
+
+### BI-13 — 两个调度器直接写同一轴 + bang-bang 大步长
+- **HARDWARE OBSERVED**：tracking 把 tilt 收敛到目标（95→103→111→114→115），而探索路径每 ~8s 把它复位到 95 → tilt 从未保持收敛，每个周期首条命令撞上 ±8° clamp，舵机被压下去又立刻抬回来。**tracking 命令饱和率 tilt 25% vs pan 9%**
+- **根因**：`revisit.py` 的跟踪路径与探索路径各自直接调用 `servo.pan_to`/`tilt_to`，没有仲裁；且一次意图作为单条命令下发（60° 扫视 = 60° bang-bang）
+- **修复**：新增 `perception/ptz_motion.py` 作为**唯一**运动写入者 —— 所有权仲裁（TRACK > EXPLORE，WEAR_PROTECT 可抢占）、`MAX_STEP_DEG=20` 限速步进、latest-setpoint-wins（不排队、无积压）。探索的 tilt→95 复位额外用既有的 presence window 守卫
+- **未改变**：1.5s / 8s 节奏、±15°/±8° clamp、Arduino 固件、目标选择
+- **证据（测试）**：`tests/test_ptz_motion.py` 8 个用例；`test_revisit_writes_movement_only_through_the_motion_layer` 直接断言 `revisit.py` 不再出现 `_servo_ptz.pan_to(` / `tilt_to(` / `pan_relative(` / `center(`
+- **提交**：`c9593a8`（实机：无 bang-bang 反转、无积压）
+
+### BI-14 — tracking session 由"看到脸"启动 + center-lock 逐帧微动
+- **根因（两条）**：
+  1. `tick()` 的 `if faces or objects: self._track_target(now)`（BI-12 的解耦手段）**无守卫** —— 检测到人脸/人体即启动跟踪，不需要任何"决定要跟"的上游判断。实机表现为 startup sweep 期间每张脸都被交给跟踪，跟踪与 sweep 每 8s 争夺 tilt
+  2. 旧 dead zone 是 `abs(dx) < 0.06 and abs(dy) < 0.06`（**与**逻辑），gain 1.0 把目标推向画面中心 → 只要有一个轴偏移超过 6%，另一个轴哪怕偏移 1% 也会下发命令
+- **修复**：
+  - 删除无守卫 fast path。**tracking session** 由现有 revisit/commitment 流程建立（`_track_target` 是 `CommitmentEngine.begin` 的唯一调用者），**检测本身不再启动跟踪**；session 打开后 movement update 仍按 1.5s 节奏、不受 8s 闸门限制（BI-12 的成果保留）
+  - `_track_target` 拆为 建立（`_track_target`）/ 逐帧（`_framing_update`，只 `confirm` 不 `begin`）/ 取目标（`_acquire_track_target`）/ 修正（`_aim` + `_keep_in_frame`）
+  - center-lock → **keep-in-frame**：舒适区（|dx|≤0.15, |dy|≤0.20）不动，外边界（0.30）启动跟随，内边界停止（迟滞带），修正量 = `gain(0.5) × 超出内边界的部分`，**瞄准内边界而非中心**
+- **未改变**：target selection / Focus / Attention / Commitment 语义 / Interest / Curiosity / Entity 关联 / 感知 / 1.5s 与 8s 参数 / Arduino 固件
+- **证据（实机 A/B，同日同一场景，各 7 分钟，1773 vs 1644 个目标观测）**：
+
+  | 指标 | 新（keep-in-frame） | 旧（HEAD，center-lock + fast path） |
+  |---|---|---|
+  | 目标在舒适区内时下发命令的帧 | **1 / 1155（0.09%）** | **154 / 1574（9.8%）** |
+  | 命令发生时的 \|dy\|（tilt 命令） | min 0.22 / median 0.30 | min 0.06 / median **0.09** |
+  | tilt 步长达到 ±8° clamp | **0 / 6** | 3 / 14（21%） |
+  | session 窗口（t>65s）舵机行程 | 0.5s / 356s | 0.9s / 356s |
+  | session 窗口 pan 累计度数 | 7° | 66° |
+
+  逐条对照验收项：小幅头部/身体移动（\|dx\| 0.00–0.18、\|dy\| 0.01–0.27 共 1522 帧）→ **0 条命令**；接近边缘才跟随 → |dx|=0.39 时 pan+7°（旧代码为 25° 撞 clamp），\|dy\|=0.35 时 tilt 95→98→101→105→108→110→111（+3/+3/+4/+3/+2/+1，逐步衰减）；回到安全区即停 → 停在 dy=0.22，**未追到中心**，其后 339s 零命令；不再自扰动 → session 内 0.5s 行程；≤1.5s 更新能力 → 命令间隔 1.3–1.9s（即 1.5s 节奏 + 帧/队列延迟）
+- **证据（测试）**：`tests/test_ptz_gentle_framing.py` 11 例、`test_revisit_tracking_cadence.py` 改写为 session 契约、`test_ptz_motion.py` 的 `test_the_startup_sweep_is_the_only_writer_while_detections_come_in`（旧代码下 3 项失败）
+- **状态**：**FIXED（代码 + 实机验证）**
+
 ---
 
 ## OPEN-CONFIRMED
 
-### PTZ 外层 8s gate 压制内层 1.5s tracking
-- **HARDWARE OBSERVED**（同上日志）：PTZ 命令全程仅 **53 条**（27 pan + 26 tilt）/794s ≈ 4/min；跟踪期间隔 **~8–9s**，其后出现 **114s / 162s / 255s** 的空档
-- **根因（INFERRED，代码 + 节奏一致）**：`revisit.py:56` `self.revisit_interval = 8.0`，`tick()` 在 `revisit.py:140` 早退；而 `_track_target` 的**全部**调用点（251/299/410/464）都在该闸门之后，于是内层 `revisit.py:82` `_track_interval = 1.5` 被完全支配 → 有效跟踪更新率 ≈ 8s，比设计慢约 5 倍
-- **影响**：用户主观观察"PTZ 跟踪有时反应偏慢"的直接来源。次要贡献：**YuNet 在 30% 的检测帧漏检人脸**（2149 检测帧中 638 帧 faces=0 但 objects≥1），而 `_track_target` 需要 face 或 YOLO person 才能算偏移
-- **未修复**（本轮明确不处理 PTZ）
+### tracking session 只能由"停在合格 anchor 上"这一条路径开启
+- **证据**：`_track_target` 的 5 个调用点中，4 个在 `_commitment_holds()` 之后，而 `_commitment_holds` 要求 `has_commitment` 已为真 —— 它们只能**刷新**已有 session，不能建立。唯一能建立的是 stay-at-anchor 分支，前置条件为：非 startup 窗口、anchor 在 pan±15° 内、非 barren、非 suppressed、`interest > 0.08`、`baseline_objects` 非空。
+- **影响**：站在相机前但当前不在"值得停留的锚点"上的人**完全不会被跟随**（旧代码的 fast path 跟随任何一张脸）。这是本轮"检测不得启动跟踪"的直接后果，但实际闸门是 anchor-stay 启发式，比"由 revisit/commitment 流程决定"更严。
+- **实机观察**：14:03 那次运行在 `Revisit [stay]: anchor_80_90` 出现后 1 秒内建立 session 并全程保持 —— 桌面场景下可达，但需要用户先建立 anchor。
+- **归属**：本轮 diff 引入的**有意**收窄，需产品决策而非 bug 修复。
+
+### `target is None` + `_commitment_holds` 分支不更新 `_last_revisit`
+- **证据**（代码 + 实机）：`if self._commitment_holds(now): self._track_target(now); return` 没有 `self._last_revisit = now`。承诺存在时该分支每帧进入 → 8s 闸门实质失效 → `Revisit [pick]` 与 `Commitment.Telemetry` 各约 **5 行/秒**（14:03 运行 351 行 / 150s）。
+- **影响**：日志噪音（使长测的轮转窗口更紧张，见"日志轮转"条）；行为等价（`_track_target` 自身有 1.5s 节流）。
+- **归属**：**既存**（P0008.1 commitment 引入时即有），非本轮 diff 引入 → 只登记，本轮不修。
+
+### 人脸 bbox 优先于人体 bbox，会因偏移的人脸框而平移
+- **证据**（实机 14:04:47）：`Framing face: dx=-0.39 dy=0.02 → pan+7`，而同一时刻 person bbox 在 `dx=-0.06` —— 人脸框落在画面左缘，相机因此平移 7°。
+- **影响**：轻微、偶发。新代码只移动 7°，旧代码同条件下移动 25°（撞 ±15° clamp）。属既存启发式。
+- **归属**：**既存**，非本轮 diff 引入 → 只登记。
+
+### `_last_track_hit` 不再由"裸检测"刷新，连带改变两个消费者
+- **证据**（代码路径）：删除 fast path 后，`_last_track_hit` 只在 session 打开时刷新。两个消费者因此改为随 session 变化：stay 档位判定的 `has_life`（`now - _last_track_hit < 15`）与 sweep/explore 的 tilt→95 守卫。
+- **影响**：有 session 时两者行为不变（实机全程保持 session）；无 session 时"画面里有人"不再抬高 stay 档位。因 session 会在第一个 stay 周期内建立，实机未观察到功能断裂。
+- **归属**：本轮 diff 的连带效应，未构成 bug，登记以备长测时解释档位变化。
+
+### `Revisit [stay]` 日志中的 `track=1790229886s ago`
+- **证据**（实机）：`_last_track_hit` 未初始化时为 `0.0`，日志直接输出 `now - 0.0`（绝对 epoch 秒）。
+- **影响**：纯观感。**归属**：既存，非本轮 diff 引入。
 
 ### `RevisitController._last_track_hit` 在静止期不刷新
 - **证据**：代码路径 —— `revisit.py:610` 是唯一写入点，位于 `_track_target` 内，而该函数在 `faces`/`objects` 皆空时提前返回；`revisit.py:227` 以 `< 15.0` 判 `has_life`。
@@ -216,9 +273,9 @@
 
 1. ~~`desk_changed` 永久卡住 → L5 记忆被重复 `new_object` 淹没~~ —— **BI-10 已修（待实机复验）**
 2. attention 电平触发 → 重复 `human_face` 进入 L5（OPEN-CONFIRMED，既存设计；实机 `ATTENTION new_object` 与 `human_face` 均≈每帧）
-3. `_last_track_hit` 静止期不刷新 → 可能主动离开一个不动的人（OPEN-CONFIRMED）
+3. `_last_track_hit` 静止期不刷新 → 可能主动离开一个不动的人（OPEN-CONFIRMED；BI-14 后又多了一层 session 依赖，见对应条目）
 4. ~~`AnchorManager` 20°/30° 网格不一致~~ —— **BI-11 已修（待实机复验）**
-5. **PTZ 外层 8s gate 压制 1.5s tracking** → 跟踪更新率比设计慢约 5 倍（OPEN-CONFIRMED，实机观测；本轮未修）
+5. ~~PTZ 外层 8s gate 压制 1.5s tracking~~ —— **BI-12/13/14 已修 + 实机验证**；新的自变量是 **session 只在合格 anchor 上开启**（OPEN-CONFIRMED，需产品决策）
 
 **Test B（真实离开）仍为 Pending Validation** —— 2026-09-24 那次运行用户在末尾 5.7 分钟持续在场（`faces=1` × 1152 帧），没有发生离开，离开路径未获实机验证。
 

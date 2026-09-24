@@ -10,7 +10,7 @@ Key invariants:
 - Entity locations update on confirm; regions are fixed anchors
 """
 
-import time, logging, threading
+import math, time, logging, threading
 from typing import Optional
 
 from runtime.interest.verifier import VLMVerifier, Verdict
@@ -26,6 +26,20 @@ _SPARSE_AND_SUSPECT_CLASSES = {
     "cell phone", "mouse", "toothbrush", "book", "keyboard",
     "remote", "clock", "handbag", "cup", "bottle",
 }
+
+# ── Gentle framing (framed, not centred) ──
+# A tracked target is kept in frame, not driven to the middle of it. A large
+# comfort zone absorbs small head and body movement, the outer edge starts a
+# follow, and the follow runs only until the target is back inside the inner
+# edge. The band between the two edges is what stops the camera hunting back
+# and forth across a single boundary. A correction takes the excess over the
+# inner edge — never the whole offset — and only a fraction of it, so the
+# camera moves gradually and stops as soon as the target is framed again.
+FRAMING_OUTER_X = 0.30      # normalised |dx| at which a pan follow starts
+FRAMING_INNER_X = 0.15      # normalised |dx| at which the pan follow stops
+FRAMING_OUTER_Y = 0.30      # normalised |dy| at which a tilt follow starts
+FRAMING_INNER_Y = 0.20      # normalised |dy| at which the tilt follow stops
+FRAMING_GAIN = 0.5          # fraction of the excess corrected per update
 
 
 class RevisitController:
@@ -80,15 +94,19 @@ class RevisitController:
         self._pending_entity = None     # (entity, deadline)
         self._pending_legacy = None     # (target, deadline)
 
-        # Target tracking (adapted from face_tracker_v7 logic)
+        # Gentle framing (keep-in-frame). Tuning sits here with the rest of the
+        # revisit cadence, and each value can be overridden per instance.
         self._last_track = 0.0
-        self._track_interval = 1.5      # seconds between track adjustments
-        self._track_dead_zone = 0.06    # 6% of frame (ignore tiny offsets)
-        self._track_gain = 1.0          # proportional: move 100% of offset
+        self._track_interval = 1.5      # seconds between framing updates
         self._cam_fov_h = 55.0          # horizontal FOV degrees
-        self._last_track_dir = None     # for direction lockout
-        self._track_nudge_count = 0     # nudges this observe cycle
-        self._last_track_hit = 0.0      # last time tracking found a target (presence signal)
+        self._framing_outer_x = FRAMING_OUTER_X
+        self._framing_inner_x = FRAMING_INNER_X
+        self._framing_outer_y = FRAMING_OUTER_Y
+        self._framing_inner_y = FRAMING_INNER_Y
+        self._framing_gain = FRAMING_GAIN
+        self._framing_pan = False       # a pan follow is running (hysteresis)
+        self._framing_tilt = False      # a tilt follow is running (hysteresis)
+        self._last_track_hit = 0.0      # last time a target was in view (presence signal)
         self._last_tilt_recovery = 0.0   # last time we pulled tilt back from extreme
 
         # Sweep exploration state
@@ -140,15 +158,18 @@ class RevisitController:
                 self._pending_legacy = None
                 self._confirm(target)
 
-        # ── Track a visible target on its own cadence ──
-        # Aiming must not wait out the revisit gate: with a target in view the
-        # camera has to answer in _track_interval, not in revisit_interval.
-        # _track_target keeps its own 1.5s interval and its own "camera busy"
-        # guard, and it returns immediately when no face/person is in view, so
-        # this only shortens the cadence while something is actually tracked.
-        # Idle, revisit and sweep still run on the revisit cadence below.
-        if faces or objects:
-            self._track_target(now)
+        # ── Movement updates for an open tracking session ──
+        # A session is opened by the revisit/commitment flow further down,
+        # never by a detection: seeing a face or a person is not by itself a
+        # reason to start following it. Once one is open, though, its framing
+        # updates must not wait out the revisit gate — the camera has to answer
+        # in _track_interval, not in revisit_interval. _framing_update keeps
+        # its own 1.5s interval and its own "camera busy" guard and does
+        # nothing when no face/person is in view, so this only shortens the
+        # cadence while a target is actually being framed. Idle, revisit and
+        # sweep still run on the revisit cadence below.
+        if self._tracking_session_active(now):
+            self._framing_update(now)
 
         # Advance pending movement every frame, not only when the revisit gate
         # opens — otherwise a rate-limited move would stall between decisions.
@@ -586,33 +607,65 @@ class RevisitController:
                             entity.entity_id, entity.consecutive_fails)
                 self._attn_end("lost")
 
+    # ── Tracking session: establishment, then gentle framing ──
+
+    def _tracking_session_active(self, now: float) -> bool:
+        """True while the revisit/commitment flow holds an open tracking session.
+
+        A session is opened by that flow — `_track_target` is the only caller of
+        CommitmentEngine.begin — and it lives as long as its target is still
+        being seen. A detection on its own never opens one: deciding to follow
+        someone is a decision, not something the detector hands over.
+        """
+        return (self._commitment_engine.has_commitment
+                and (now - self._last_track_hit) < PRESENCE_WINDOW)
+
     def _track_target(self, now: float):
-        """During active stay, track target — adjust PTZ to center it smoothly.
+        """Open or refresh the tracking session, and frame its target once.
 
-        Uses YOLO bbox + Face bbox to compute exact angular offset.
-        Bbox center → pixel offset → FOV-proportional angle delta → servo move.
+        Called by the revisit/commitment flow and nowhere else — this is the
+        only place a session is established.
+        """
+        target = self._acquire_track_target(now)
+        if target is None:
+            return
+        self._commitment_engine.begin("person", now)
+        self._aim(now, target)
 
-        Hardware: p0=rightmost, p180=leftmost.
-        Target on LEFT of frame → turn LEFT (pan increase → 180).
-        Target on RIGHT of frame → turn RIGHT (pan decrease → 0).
+    def _framing_update(self, now: float):
+        """One keep-in-frame update for a session that is already open.
+
+        Refreshes the commitment instead of establishing it: a target we are
+        actively framing is by definition still present, and without the
+        refresh the commitment would go stale mid-frame and drop a person
+        standing right in front of the camera.
+        """
+        target = self._acquire_track_target(now)
+        if target is None:
+            return
+        self._commitment_engine.confirm(now)
+        self._aim(now, target)
+
+    def _acquire_track_target(self, now: float):
+        """The face or person to frame, as (cx, cy, label), or None.
+
+        Also records the presence signal (`_last_track_hit`) that the session
+        gate and the sweep's tilt-levelling guard both read. The face bbox is
+        preferred over the YOLO person bbox — it is the more precise of the two.
         """
         if self._servo_ptz is None or self._servo_ptz.moving:
-            return
+            return None
         if now - self._last_track < self._track_interval:
-            return
+            return None
 
         # Use pre-computed detections from main loop (avoids duplicate ONNX inference)
         faces = self._cached_faces or []
         objects = self._cached_objects or []
 
-        # Need frame dimensions for offset calc — use fixed camera resolution
-        h, w = 480, 640
-        cx, cy = w / 2, h / 2
-
         # Priority: face > YOLO person (largest bbox = closest)
         best_cx, best_cy, label = None, None, ""
 
-        # 1. Face detection — most precise for centering
+        # 1. Face detection — most precise for framing
         if faces:
             b = max(faces, key=lambda f: f.get("confidence", 0)).get("bbox", {})
             if b:
@@ -620,7 +673,7 @@ class RevisitController:
                 best_cy = b.get("y", 0) + b.get("height", 0) / 2
                 label = "face"
 
-        # 2. YOLO person — bbox gives exact position, smooth tracking
+        # 2. YOLO person — bbox gives exact position
         if best_cx is None and objects:
             persons = [o for o in objects if o.get("class_name") == "person"]
             if persons:
@@ -632,32 +685,40 @@ class RevisitController:
                 label = "person"
 
         if best_cx is None:
-            return
+            return None
 
-        # Presence signal: we saw a person/face right now → anchor is "live"
+        # Presence signal: a target is in view right now, so the session is
+        # live and the anchor counts as "has life" for its stay tier.
         self._last_track_hit = now
+        return best_cx, best_cy, label
 
-        # P0008.1: establish/refresh commitment to the person being tracked.
-        self._commitment_engine.begin("person", now)
+    def _aim(self, now: float, target):
+        """Frame the target: correct only what has left the comfort zone.
 
-        # Offset from center (−1..+1, negative=left side of frame)
+        Hardware: p0=rightmost, p180=leftmost.
+        Target on LEFT of frame → turn LEFT (pan increase → 180).
+        Target on RIGHT of frame → turn RIGHT (pan decrease → 0).
+        """
+        best_cx, best_cy, label = target
+
+        # Need frame dimensions for offset calc — use fixed camera resolution
+        h, w = 480, 640
+        cx, cy = w / 2, h / 2
+
+        # Offset from centre (−1..+1, negative=left side of frame)
         dx = (best_cx - cx) / w
         dy = (best_cy - cy) / h
 
-        # Dead zone: skip tiny offsets to prevent micro-oscillation
-        if abs(dx) < self._track_dead_zone and abs(dy) < self._track_dead_zone:
-            return
-        self._last_track = now
+        step_x, self._framing_pan = self._keep_in_frame(
+            dx, self._framing_outer_x, self._framing_inner_x, self._framing_pan)
+        step_y, self._framing_tilt = self._keep_in_frame(
+            dy, self._framing_outer_y, self._framing_inner_y, self._framing_tilt)
 
-        # Proportional: bbox offset → angular delta via FOV
-        # Pan:  dx negative = left side → pan INCREASE toward 180 (correct with -dx)
-        # Tilt: dy positive = below center → tilt INCREASE toward 180 (look down)
-        pan_delta_raw = -dx * self._cam_fov_h * self._track_gain
-        tilt_delta_raw = dy * self._cam_fov_h * (h / w) * self._track_gain
-
-        # Round to integer for servo (no minimum clamp — dead zone suffices)
-        pan_delta = int(round(pan_delta_raw))
-        tilt_delta = int(round(tilt_delta_raw))
+        # Proportional: normalised offset → angular delta via FOV.
+        # Pan:  dx negative = left side → pan INCREASE toward 180 (hence -step_x)
+        # Tilt: dy positive = below centre → tilt INCREASE toward 180 (look down)
+        pan_delta = int(round(-step_x * self._cam_fov_h * self._framing_gain))
+        tilt_delta = int(round(step_y * self._cam_fov_h * (h / w) * self._framing_gain))
 
         # Safety clamp: max 15° pan, 8° tilt per adjustment
         pan_delta = max(-15, min(15, pan_delta))
@@ -681,14 +742,15 @@ class RevisitController:
         if pan_delta == 0 and tilt_delta == 0:
             return
 
-        logger.info("Track %s: dx=%.2f dy=%.2f → pan%+d tilt%+d (pan=%d tilt=%d)",
+        self._last_track = now
+        logger.info("Framing %s: dx=%.2f dy=%.2f → pan%+d tilt%+d (pan=%d tilt=%d)",
                     label, dx, dy, pan_delta, tilt_delta,
                     self._servo_ptz.pan, current_tilt)
 
-        # Attention span: tracking hit
+        # Attention span: framing hit
         self._attn_hit()
 
-        # Tracking owns both axes for TRACK_HOLD_SEC after this request, so
+        # Framing owns both axes for TRACK_HOLD_SEC after this request, so
         # exploration cannot turn away mid-follow. The layer walks the
         # setpoints in rate-limited steps.
         self._motion.track(
@@ -696,6 +758,23 @@ class RevisitController:
             pan=self._servo_ptz.pan + pan_delta if pan_delta else None,
             tilt=self._servo_ptz.tilt + tilt_delta if tilt_delta else None,
         )
+
+    @staticmethod
+    def _keep_in_frame(offset: float, outer: float, inner: float,
+                       following: bool):
+        """Signed excess over the inner edge for one axis, plus the follow state.
+
+        Nothing moves inside the comfort zone, so small head or body movement
+        leaves the camera still. The outer edge starts a follow; the follow
+        then continues while the offset is outside the inner edge — the band
+        between the two edges is the hysteresis that stops the camera hunting
+        back and forth across a single boundary. What is corrected is the
+        excess over the inner edge, not the offset itself, so the camera pulls
+        the target back into frame instead of driving it to the centre.
+        """
+        if abs(offset) > (inner if following else outer):
+            return math.copysign(abs(offset) - inner, offset), True
+        return 0.0, False
 
     # ── Attention Span ──
 

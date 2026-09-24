@@ -78,13 +78,25 @@ CANDIDATE (5 sightings to promote) → ACTIVE → LOST (30 misses) → FORGOTTEN
 - `runtime/perception/servo_ptz.py` — serial worker thread with response parsing
 - `runtime/interest/revisit.py` — main PTZ decision controller (sweep → stay → explore → track)
 
-### PTZ Tracking (`_track_target` in revisit.py)
+### PTZ Tracking (gentle framing in revisit.py)
+
+A **tracking session** is opened only by the revisit/commitment flow — never by
+a detection. `_track_target()` (the sole caller of `CommitmentEngine.begin()`)
+establishes one from the stay-at-anchor path; `_framing_update()` then aims it
+on the 1.5s `_track_interval`, decoupled from the 8s revisit gate. Seeing a face
+or a person is not by itself a reason to follow it.
 
 - Face bbox preferred over YOLO person bbox
-- `pan_delta = -dx × FOV × gain`, `tilt_delta = dy × FOV × h/w × gain`
+- **Framed, not centred**: a comfort zone (|dx| ≤ 0.15, |dy| ≤ 0.20) absorbs
+  small movement; the outer edge (0.30) starts a follow, the inner edge stops
+  it. The band between the two is the hysteresis
+- A correction is `gain (0.5) × the excess over the inner edge` and aims at the
+  inner edge, never at the centre: `pan_delta = -step_x × FOV × gain`,
+  `tilt_delta = step_y × FOV × h/w × gain`
 - Tilt fatigue: >155° weakens downward push (gain 1.0→0.25)
 - Tilt recovery: >150° for 90s → auto pull back to 120°
-- Presence signal (`_last_track_hit < 15s`) extends stay duration
+- Presence signal (`_last_track_hit < 15s`) extends stay duration, and is what
+  keeps an open session (and its commitment) alive
 
 ### Revisit Controller States
 

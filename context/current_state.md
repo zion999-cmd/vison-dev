@@ -10,8 +10,8 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **289 passed, 0 failed**（`conda run -n vision-dev python -m pytest -q`） |
-| Hardware baseline | **FAIL**（2026-09-24 实机运行：Test A 通过 / Test B 未覆盖 / Test C 暴露 BI-10、BI-11）—— 两条已修，**待实机复验** |
+| Code regression | **320 passed, 0 failed**（`conda run -n vision-dev python -m pytest -q`） |
+| Hardware baseline | **PARTIAL**：观测有效性部分仍需复验（Test B 未覆盖 / BI-10、BI-11 已修待复验）；**PTZ 部分 PASSED**（2026-09-24 14:03 实机 A/B 对照，见 BI-14） |
 | 分支 | `fix/frame-diff-and-dead-code`（未 merge、未 push） |
 
 已发现问题的完整登记（FIXED / OPEN-CONFIRMED / VERIFY / DEFERRED）见 [known_issues.md](known_issues.md)。
@@ -29,6 +29,8 @@
 - [x] P0008.1: Commitment / Dwell Policy（HOLD/SWITCH/RELEASE arbiter，Curiosity 与 Commitment 职责分离）— implementation done，**hardware A/B/C validation pending**
 - [x] Baseline Integrity 维护（BI-01~BI-09）：帧所有权、观测有效性契约（OBSERVED / NOT OBSERVED / STALE）、objects 与 anchor_novelty 的 partial-update 语义、离开防抖、reset 语义 — 代码层完成，`281 passed`，**hardware baseline NOT validated**
 - [x] 仓库安全重建：config.py 移出 git（密钥），新增 config.example.py，远端为干净单 commit 历史
+- [x] L6 文字 LLM 迁移到 Hermes 默认 provider（volcengine-plan / ark-code-latest，key 只走环境变量）；删除不可用的 DashScope VLM 后端
+- [x] PTZ：跟踪节奏与 8s revisit gate 解耦（BI-12）、PTZ Motion Layer 单写入者 + 仲裁 + 限速（BI-13）、Gentle Framing keep-in-frame + 迟滞 + 保守修正（BI-14，实机 A/B 验证通过）
 
 ## 进行中
 
@@ -47,11 +49,14 @@
 
 ## 阻塞
 
-- **Baseline Integrity Gate 未通过**：仍有 OPEN-CONFIRMED 行为缺陷未修复（见 [known_issues.md](known_issues.md)），
-  其中 4 项直接影响 P0008.1 长测的自变量。硬件长测暂不启动。
-- **Hardware baseline smoke test = INCONCLUSIVE**：硬件在位（Arduino `/dev/tty.usbserial-A600J5V6`、
-  摄像头索引 0/1 可打开），但 Test A/B/C 需要用户的物理动作（进入画面/静止/离开/放置物体），
-  本轮未执行。审计发现仪器覆盖不足的项已由诊断探针补上（见下）。
+- **Baseline Integrity Gate 未通过**：仍有 OPEN-CONFIRMED 行为缺陷未修复（见 [known_issues.md](known_issues.md)）。
+  硬件长测暂不启动。
+- **需要产品决策（非 bug）**：BI-14 之后，tracking session 只能由"停在合格 anchor 上"这一条路径开启 ——
+  站在相机前但不在合格锚点上的人完全不会被跟随。这是"检测不得启动跟踪"的必然结果，
+  但实际闸门比"由 revisit/commitment 流程决定"更严，是否接受由用户拍板。
+- **Hardware baseline smoke test = PARTIAL**：硬件在位（Arduino `/dev/tty.usbserial-A600J5V6`、
+  摄像头索引 0）。PTZ 部分 2026-09-24 已做完整 A/B 实机对照并通过；
+  Test A/B/C 中依赖"进入画面/离开/放置物体"的项仍需用户的物理动作，本轮未执行。
 - 诊断探针（`OBS` / `SCENE` / `ANCHOR lookup` / `ANCHOR observe` / `ATTENTION new_object`）
   已就位，**全部为 DEBUG、文件-only、行为中立**，仅用于 Hardware Baseline Smoke Test 的证据采集；
-  这不是新的 runtime capability。等用户执行实机 smoke test。
+  这不是新的 runtime capability。

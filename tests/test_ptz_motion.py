@@ -164,28 +164,29 @@ def test_sweep_levels_the_tilt_once_presence_lapses():
     assert 95 in targets, "an empty room must still scan at level"
 
 
-def test_sweep_cannot_reset_tilt_onto_a_tracked_target():
-    """End to end through tick(): the startup sweep is due and a person is
-    vertically off-centre, so tracking moves the tilt. The sweep's tilt→95
-    must never reach the servo."""
+def test_the_startup_sweep_is_the_only_writer_while_detections_come_in():
+    """Hardware 2026-09-24: every face during the startup sweep was handed
+    straight to _track_target(), which then fought the sweep over the tilt —
+    the sweep pulled it back to 95° every 8s and the follow re-corrected
+    through the ±8° clamp for 3-4 commands. A detection is not a reason to
+    follow, so until the revisit/commitment flow opens a session the sweep is
+    the only writer."""
     servo = MagicMock()
     servo.moving = False
     servo.pan = 90
     servo.tilt = 100
-    ctrl = RevisitController(interest_engine=MagicMock(), servo_ptz=servo,
-                             camera_state=MagicMock())
-    now = 1000.0
-    ctrl._started_at = now - 10.0     # inside the 60s startup sweep window
-    ctrl._last_move = 0.0             # sweep is due
-    ctrl._last_revisit = 0.0          # revisit gate open
+    ctrl = _controller(servo)         # inside the startup window, sweep due
 
     tilt_targets = []
     servo.tilt_to.side_effect = lambda a: tilt_targets.append(a)
 
-    for i in range(4):
+    for i in range(5):
         servo.moving = False
-        ctrl.tick(now + i * 0.2, faces=FACE_LOW, objects=[])
+        ctrl._last_move = 0.0         # the sweep is due on every frame
+        ctrl.tick(1000.0 + i * 0.2, faces=FACE_LOW, objects=[])
 
-    assert tilt_targets, "tracking should have moved the tilt"
-    assert 95 not in tilt_targets, \
-        "the sweep must not reset tilt while a target is being tracked"
+    assert 95 in tilt_targets, "the sweep must still level the tilt for an empty room"
+    assert set(tilt_targets) == {95}, \
+        "a detection must not start a follow that fights the sweep for the tilt"
+    assert not ctrl._commitment_engine.has_commitment, \
+        "a detection during the sweep must not open a tracking session"
