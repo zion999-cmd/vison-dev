@@ -286,10 +286,22 @@ class RevisitController:
                             self._best_anchor_pan = a.pan
 
                         if should_leave:
-                            # False positive (VLM/flat-interest) — never hold it.
-                            self._commitment_engine.reset()
+                            # The anchor is a false positive (flat interest /
+                            # sparse suspect classes / VLM said trivial). Its
+                            # interest was already zeroed above, and that is
+                            # what ends the stay — it drops out of the stay
+                            # candidates on its own.
+                            #
+                            # It must NOT clear the commitment. That belongs to
+                            # the person being watched: "this anchor is boring"
+                            # is not "this person left". Clearing it here killed
+                            # the tracking session mid-walk on hardware
+                            # (2026-09-24 t=170s) and left the camera pointed at
+                            # nothing for 16s while the person stayed in frame.
+                            # The commitment still ends on its own terms —
+                            # lost / stale / timeout in `decide()`.
                             self._attn_end("suppressed")
-                            pass  # fall through to target selection
+                            # fall through to target selection
                         elif stayed > max_stay:
                             # P0008.1: a present person keeps us here past the
                             # novelty-based stay timeout (the Commitment Gap).

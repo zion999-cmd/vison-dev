@@ -18,9 +18,9 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **320 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
+| Code regression | **333 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
 | Hardware baseline | **PARTIAL**：2026-09-24 07:15 那次 Test A 通过 / Test B **未覆盖** / Test C 暴露 BI-10、BI-11（两条已修，待复验）；**PTZ 部分 PASSED** —— 2026-09-24 14:03 实机 A/B 对照，见 BI-14 |
-| 实机运行 | 3 次：07:15:32（13m14s，3873 帧）、14:03:34（7m01s，2060 帧，新代码）、14:11:47（7m03s，2076 帧，HEAD 对照） |
+| 实机运行 | 5 次：07:15:32（13m14s，3873 帧）、14:03:34 / 14:11:47（各 ~7m，A/B 对照）、15:52:58（7m26s，走动 A/B，**判定 INVALID**）、17:28:25（5m43s，BI-15 验证） |
 | 分支 | `fix/frame-diff-and-dead-code`（未 merge、未 push） |
 | 已提交前序 | `73f8ac4` `21d7d47` `ad77f22` `7e7a5ff` `f4d8879` `92a99bb` `0e061e9` `feec2bc` `94dd360` `557ec9f` `c9593a8` |
 
@@ -128,7 +128,28 @@
 
   逐条对照验收项：小幅头部/身体移动（\|dx\| 0.00–0.18、\|dy\| 0.01–0.27 共 1522 帧）→ **0 条命令**；接近边缘才跟随 → |dx|=0.39 时 pan+7°（旧代码为 25° 撞 clamp），\|dy\|=0.35 时 tilt 95→98→101→105→108→110→111（+3/+3/+4/+3/+2/+1，逐步衰减）；回到安全区即停 → 停在 dy=0.22，**未追到中心**，其后 339s 零命令；不再自扰动 → session 内 0.5s 行程；≤1.5s 更新能力 → 命令间隔 1.3–1.9s（即 1.5s 节奏 + 帧/队列延迟）
 - **证据（测试）**：`tests/test_ptz_gentle_framing.py` 11 例、`test_revisit_tracking_cadence.py` 改写为 session 契约、`test_ptz_motion.py` 的 `test_the_startup_sweep_is_the_only_writer_while_detections_come_in`（旧代码下 3 项失败）
+- **状态**：**FIXED（代码 + 实机验证）** —— 注：上表只证明了"不该动时不动"（自扰动），**没有**测量跟随响应，这正是随后 BI-16 存在的原因；其参数取值已被 BI-16 取代。表本身有效（那两段运行中 session 全程存活）。
+
+### BI-15 — anchor-level 判断错误销毁 person-level commitment
+- **HARDWARE OBSERVED**（`runtime_20260924_155258.log`，forensics 于 `context/` 之上）：t=170s `Flat interest: anchor_80_90 stuck at 0.100 for 89s — likely empty wall, moving on` → `should_leave` 分支调用 `self._commitment_engine.reset()` → **person commitment 被 anchor 判断销毁**。随后 16s 内 97 帧里有 92 帧目标远在舒适区之外（|dx|>0.15）而相机毫无动作，explore 分支把相机朝**人所在的反方向**转了 30°（90→60）；t=186 重新建立 session 后立刻用一条 +15° 命令补回来。
+- **根因**：ownership crossing。`reset()` 的语义是"当前 target 是假阳性"，而触发它的是**锚点**的新鲜度判断（flat interest / 稀疏可疑类 / VLM trivial）。锚点无聊 ≠ 人离开了。三个触发分支本身已经把 `anchor.interest` 归零（VLM 另加 `suppressed`），这才是让锚点退出 stay 候选的机制。
+- **修复**：删除该 `reset()` 调用。commitment 只能由它自己的语义结束（`decide()` 的 lost / stale / timeout / SWITCH）。未改动 Commitment、acquisition、Framing、Motion Layer、任何参数。
+- **证据（测试）**：`tests/test_anchor_leave_ownership.py` 7 例 —— 三个触发分支各一例（flat / sparse / VLM）证明 active commitment 存活；一例证明存活的 session 仍在收图（断言 `pan+10` 是 framing 修正而非 explore 转向）；两例证明 anchor 自己的 leave 行为不变（interest 归零、stay 结束、不重新进入）；一例证明人离开时 commitment 仍能正常 RELEASE（不是永生）。
+- **证据（实机，`runtime_20260924_172825.log`，343s）**：`Flat interest` 触发**两次**（t=213 `anchor_120_90`、t=333 `anchor_80_90`）；结果 `Commitment Start` **仅 1 次**（t=80）、`RELEASE`/`SWITCH` **0 次**、`Revisit [turn]`（explore 转向）**0 次**。第一次 flat-interest 之后 35s 内仍发生 **35 条 framing 命令**（pan 达 ±15°、tilt 达 ±8°），即"锚点被判无聊 → 相机继续跟随人"。锚点自身的 leave 也正常：`anchor_120_90`（hot 0.775）被放弃，相机转到 `anchor_80_90` 停留。
 - **状态**：**FIXED（代码 + 实机验证）**
+
+### BI-16 — Gentle Framing 用单一阈值同时决定 trigger / correction / residual
+- **来源**：用户实机反馈"不会追踪 / 追得太慢"驱动的 forensics（见本文件 BI-14 条目的实机数据）。几何量：触发点 192px vs 557ec9f 的 38px；单次修正 4–8° vs 15°；残余 96px；可持续跟随速度 6.7°/s 且只在画面边缘才达到；±15°/±8° clamp 变成死代码（最大修正仅 9.6°/6.2°）。
+- **根因**：`_keep_in_frame(offset, outer, inner, following)` 让 `inner` 同时决定"修正起点"和"最终残余"，`outer` 决定触发，gain 0.5 决定幅度 —— 一个大舒适区必然同时导致**晚触发 + 弱修正 + 大残余**。
+- **修复**：拆成三个独立控制量 —— `start_offset`（何时开始，pan 0.15 / tilt 0.20）、`aim_offset`（追到哪里 = 残余，pan 0.06 / tilt 0.08）、`gain`（1.0 = 不过冲 aim 点的最大增益，也是让 clamp 重新有效的值）。触发点 192→**96px**，残余 96→**38px**，可持续跟随恢复 10°/s（pan）/ 5.3°/s（tilt），clamp 在 |dx|>213px 后生效。
+- **未改变**：Motion Layer 的 slew/仲裁、1.5s/8s、acquisition、face/person 参考、任何其他参数。
+- **证据（测试）**：`tests/test_ptz_gentle_framing.py` 重写为新契约（17 例），含三个旋钮相互独立的用例（改 start 不改变同 offset 的修正量；gain 线性缩放修正量；修正永不过冲 aim 点）。
+- **证据（实机，`runtime_20260924_172825.log`）**：|dx| 达 0.43–0.48 的走动期间相机给出 34 条 framing 命令（17 + 35 两个活跃窗口，含 ±15°/±8° clamp 命令）；|dx| 中位数 0.02 的静止段**零命令**。**注意：原本设计的"新旧参数同场 A/B"（`/tmp/ptz_walk_walk1.jsonl`）已判定 INVALID** —— 两段 session 状态不同（含 16s 无 session 窗口与一次 explore 转向），且新参数在 phase A 内**从未被触发**（chosen |dx| 超阈值 0 帧），旧参数仅触发 1 次。因此本条不声称 A/B 结论，只声称几何修正 + 上述实机跟随行为。
+- **状态**：**FIXED（代码 + 实机验证）**
+
+---
+
+## OPEN-CONFIRMED
 
 ---
 
@@ -143,7 +164,13 @@
 ### `target is None` + `_commitment_holds` 分支不更新 `_last_revisit`
 - **证据**（代码 + 实机）：`if self._commitment_holds(now): self._track_target(now); return` 没有 `self._last_revisit = now`。承诺存在时该分支每帧进入 → 8s 闸门实质失效 → `Revisit [pick]` 与 `Commitment.Telemetry` 各约 **5 行/秒**（14:03 运行 351 行 / 150s）。
 - **影响**：日志噪音（使长测的轮转窗口更紧张，见"日志轮转"条）；行为等价（`_track_target` 自身有 1.5s 节流）。
+- **补充（BI-15 之后更常见）**：该路径现在是"commitment 存活但没有 stay 锚点"时的常态入口。实机 `runtime_20260924_172825.log` 中它每帧打印 `Revisit [pick]: ... staying=no → explore`，但下一行实际走的是 `_commitment_holds` → HOLD → framing（相机并未 explore）。**日志标签与真实分支不符**，会误导基于日志的判断。
 - **归属**：**既存**（P0008.1 commitment 引入时即有），非本轮 diff 引入 → 只登记，本轮不修。
+
+### presence 变陈旧会让 session 静默休眠（不是 RELEASE）
+- **证据（实机 `runtime_20260924_172825.log`）**：t=113–205s 出现 **83.8s 连续无任何 face/person 检测**（该窗口 92s 内仅 74 个检测帧 = 16% 覆盖）。期间 `_last_track_hit` 变陈旧 → `_tracking_session_active()` 为假 → framing 完全停止；`_commitment_holds` 未被调用（stay 分支提前 return），因此**既不 RELEASE 也不重新建立**。t≈198 检测恢复后由 stay 分支的 `_track_target` 重新点火。
+- **影响**：人一旦长时间不在检测范围内（或检测连续漏检），相机会静默停摆，且没有任何"重新找回来"的路径，直到 stay 闸门恰好再次找到目标。与"acquisition 过窄"同源但触发条件不同（不是 reset，而是 presence 陈旧）。
+- **状态**：未修复（属 acquisition / presence 机制，本轮明确不含）。
 
 ### 人脸 bbox 优先于人体 bbox，会因偏移的人脸框而平移
 - **证据**（实机 14:04:47）：`Framing face: dx=-0.39 dy=0.02 → pan+7`，而同一时刻 person bbox 在 `dx=-0.06` —— 人脸框落在画面左缘，相机因此平移 7°。

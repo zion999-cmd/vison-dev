@@ -84,7 +84,10 @@ A **tracking session** is opened only by the revisit/commitment flow — never b
 a detection. `_track_target()` (the sole caller of `CommitmentEngine.begin()`)
 establishes one from the stay-at-anchor path; `_framing_update()` then aims it
 on the 1.5s `_track_interval`, decoupled from the 8s revisit gate. Seeing a face
-or a person is not by itself a reason to follow it.
+or a person is not by itself a reason to follow it. An
+anchor-level judgement (flat interest / sparse classes / VLM "trivial") ends the
+stay but never clears the commitment: that belongs to the person being watched
+and ends only on lost / stale / timeout.
 
 - Face bbox preferred over YOLO person bbox
 - **Framed, not centred**, through three independent knobs: `start_offset`
