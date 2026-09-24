@@ -27,19 +27,28 @@ _SPARSE_AND_SUSPECT_CLASSES = {
     "remote", "clock", "handbag", "cup", "bottle",
 }
 
-# ── Gentle framing (framed, not centred) ──
-# A tracked target is kept in frame, not driven to the middle of it. A large
-# comfort zone absorbs small head and body movement, the outer edge starts a
-# follow, and the follow runs only until the target is back inside the inner
-# edge. The band between the two edges is what stops the camera hunting back
-# and forth across a single boundary. A correction takes the excess over the
-# inner edge — never the whole offset — and only a fraction of it, so the
-# camera moves gradually and stops as soon as the target is framed again.
-FRAMING_OUTER_X = 0.30      # normalised |dx| at which a pan follow starts
-FRAMING_INNER_X = 0.15      # normalised |dx| at which the pan follow stops
-FRAMING_OUTER_Y = 0.30      # normalised |dy| at which a tilt follow starts
-FRAMING_INNER_Y = 0.20      # normalised |dy| at which the tilt follow stops
-FRAMING_GAIN = 0.5          # fraction of the excess corrected per update
+# ── Gentle framing: three independent knobs, not one coupled band ──
+# A tracked target is kept in frame, not driven to the middle of it. The three
+# quantities below are deliberately separate values, because one band cannot do
+# all three jobs: making the comfort zone large would then also force a late
+# trigger AND a weak correction AND a target that comes to rest near the edge.
+# That is exactly what the first cut did — a 192 px trigger, half the
+# correction, and a 96 px residual — which on hardware reads as "it does not
+# react, and when it does it barely moves".
+#
+#   start_offset — nothing moves below it, so small head and body movement is
+#                  free. Crossing it engages a follow.
+#   aim_offset   — where that follow takes the target, i.e. the residual it
+#                  leaves. Not the centre, and clearly inside the start offset.
+#   gain         — how much of the remaining excess one update removes. 1.0 is
+#                  the largest value that cannot overshoot the aim point and
+#                  the value at which the aim offset is actually reached, which
+#                  is also what brings the ±15°/±8° safety clamps back to life.
+FRAMING_START_X = 0.15      # normalised |dx| that engages a pan follow
+FRAMING_AIM_X = 0.06        # normalised |dx| a pan follow drives to
+FRAMING_START_Y = 0.20      # normalised |dy| that engages a tilt follow
+FRAMING_AIM_Y = 0.08        # normalised |dy| a tilt follow drives to
+FRAMING_GAIN = 1.0          # fraction of the excess removed per update
 
 
 class RevisitController:
@@ -99,10 +108,10 @@ class RevisitController:
         self._last_track = 0.0
         self._track_interval = 1.5      # seconds between framing updates
         self._cam_fov_h = 55.0          # horizontal FOV degrees
-        self._framing_outer_x = FRAMING_OUTER_X
-        self._framing_inner_x = FRAMING_INNER_X
-        self._framing_outer_y = FRAMING_OUTER_Y
-        self._framing_inner_y = FRAMING_INNER_Y
+        self._framing_start_x = FRAMING_START_X
+        self._framing_aim_x = FRAMING_AIM_X
+        self._framing_start_y = FRAMING_START_Y
+        self._framing_aim_y = FRAMING_AIM_Y
         self._framing_gain = FRAMING_GAIN
         self._framing_pan = False       # a pan follow is running (hysteresis)
         self._framing_tilt = False      # a tilt follow is running (hysteresis)
@@ -693,7 +702,7 @@ class RevisitController:
         return best_cx, best_cy, label
 
     def _aim(self, now: float, target):
-        """Frame the target: correct only what has left the comfort zone.
+        """Frame the target: drive it back to the aim offset, no further.
 
         Hardware: p0=rightmost, p180=leftmost.
         Target on LEFT of frame → turn LEFT (pan increase → 180).
@@ -709,14 +718,16 @@ class RevisitController:
         dx = (best_cx - cx) / w
         dy = (best_cy - cy) / h
 
-        step_x, self._framing_pan = self._keep_in_frame(
-            dx, self._framing_outer_x, self._framing_inner_x, self._framing_pan)
-        step_y, self._framing_tilt = self._keep_in_frame(
-            dy, self._framing_outer_y, self._framing_inner_y, self._framing_tilt)
+        step_x, self._framing_pan = self._framing_step(
+            dx, self._framing_start_x, self._framing_aim_x, self._framing_pan)
+        step_y, self._framing_tilt = self._framing_step(
+            dy, self._framing_start_y, self._framing_aim_y, self._framing_tilt)
 
-        # Proportional: normalised offset → angular delta via FOV.
-        # Pan:  dx negative = left side → pan INCREASE toward 180 (hence -step_x)
-        # Tilt: dy positive = below centre → tilt INCREASE toward 180 (look down)
+        # Proportional: distance from the aim point → angular delta via FOV,
+        # scaled by the gain. Pan: dx negative = left side → pan INCREASE toward
+        # 180 (hence -step_x). Tilt: dy positive = below centre → tilt INCREASE
+        # toward 180 (look down). At gain 1.0 the delta is the whole excess, so
+        # one update lands the target on the aim point.
         pan_delta = int(round(-step_x * self._cam_fov_h * self._framing_gain))
         tilt_delta = int(round(step_y * self._cam_fov_h * (h / w) * self._framing_gain))
 
@@ -760,20 +771,24 @@ class RevisitController:
         )
 
     @staticmethod
-    def _keep_in_frame(offset: float, outer: float, inner: float,
-                       following: bool):
-        """Signed excess over the inner edge for one axis, plus the follow state.
+    def _framing_step(offset: float, start: float, aim: float,
+                      following: bool):
+        """Signed distance from the aim point for one axis, plus follow state.
 
-        Nothing moves inside the comfort zone, so small head or body movement
-        leaves the camera still. The outer edge starts a follow; the follow
-        then continues while the offset is outside the inner edge — the band
-        between the two edges is the hysteresis that stops the camera hunting
-        back and forth across a single boundary. What is corrected is the
-        excess over the inner edge, not the offset itself, so the camera pulls
-        the target back into frame instead of driving it to the centre.
+        Nothing moves below the start offset, so small head or body movement
+        leaves the camera still. Crossing it engages a follow, which then stays
+        engaged — correcting on every update — until the target is back at the
+        aim offset. The band between the two is the hysteresis: a target that
+        drifts past the aim point but not past the start offset is left alone,
+        so the camera does not hunt back and forth across one boundary.
+
+        What comes back is the distance from the aim point — not from the
+        centre, and not from the start offset. The gain scales it into a
+        correction, so the two roles stay separate: the gain decides how hard
+        the camera pushes, the aim offset decides where it stops pushing.
         """
-        if abs(offset) > (inner if following else outer):
-            return math.copysign(abs(offset) - inner, offset), True
+        if abs(offset) > (aim if following else start):
+            return math.copysign(abs(offset) - aim, offset), True
         return 0.0, False
 
     # ── Attention Span ──

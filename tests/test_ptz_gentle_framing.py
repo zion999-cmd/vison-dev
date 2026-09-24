@@ -1,21 +1,98 @@
-"""Gentle framing: keep-in-frame with hysteresis, not centre-lock.
+"""Gentle framing: three independent knobs, not one coupled threshold.
 
-Centre-lock (the old 6% dead zone + gain 1.0) drove the target to the middle
-of the frame on every adjustment: any head movement, however small, produced a
-servo command, and a target that drifted near an edge was yanked all the way
-back. On hardware that shows up as continuous small movement of the PTZ while
-the person is basically still — and every one of those moves blurs the frame
-and disturbs the detector that is feeding the loop.
+The first cut of this used a single band to decide three things at once: when
+to start moving, how big the correction was, and where the target came to rest.
+Hardware caught it — a 192 px trigger, a 0.5 gain and a target parked 96 px off
+centre, i.e. "it does not react, and when it does it barely moves".
 
-Gentle framing replaces it with a large comfort zone, an outer edge that starts
-a follow, an inner edge that stops it, and a correction that removes only part
-of the excess and aims at the inner edge rather than the centre.
+The three roles are now separate knobs:
+
+    start_offset — nothing moves below it (small head/body movement is free)
+    aim_offset   — where a triggered correction takes the target: the residual
+                   it leaves. Not the centre, not the start offset.
+    gain         — how much of the remaining excess one update removes. 1.0 is
+                   the largest value that cannot overshoot the aim point, and
+                   the value at which the aim offset is actually reached.
+
+A single threshold cannot serve all three: a large comfort zone would then also
+force a late trigger and a weak correction, which is exactly what happened.
 """
+import math
 import sys
 
 sys.path.insert(0, '.')
 
 from tests.ptz_harness import (build, commanded, face_at, open_session, tick)
+
+# The contract, as numbers rather than as references to the module.
+START_X, AIM_X = 0.15, 0.06     # pan: engage past 0.15, drive to 0.06
+START_Y, AIM_Y = 0.20, 0.08     # tilt
+GAIN = 1.0
+FOV_H = 55.0                    # degrees across the frame width
+H_W = 480 / 640
+ROUNDING = 0.5 / FOV_H          # the servo takes whole degrees
+
+
+def pan_law(dx, gain=GAIN):
+    """The pan correction the controller should emit for this signed offset.
+
+    Pan increases as the target moves left (dx negative), so the sign flips.
+    """
+    excess = math.copysign(max(0.0, abs(dx) - AIM_X), dx)
+    return max(-15, min(15, -int(round(excess * FOV_H * gain))))
+
+
+def tilt_law(dy, gain=GAIN):
+    """Tilt increases as the target moves below centre, so the sign does not."""
+    excess = math.copysign(max(0.0, abs(dy) - AIM_Y), dy)
+    return max(-8, min(8, int(round(excess * FOV_H * H_W * gain))))
+
+
+def pan_command(servo, base=90):
+    assert servo.pan_to.call_count == 1, "expected exactly one pan command"
+    return servo.pan_to.call_args[0][0] - base
+
+
+# ── The knobs are three, and independent ──
+
+def test_the_three_knobs_are_distinct_values():
+    ctrl, _ = build()
+    assert ctrl._framing_start_x == START_X
+    assert ctrl._framing_aim_x == AIM_X
+    assert ctrl._framing_start_y == START_Y
+    assert ctrl._framing_aim_y == AIM_Y
+    assert ctrl._framing_gain == GAIN
+
+    assert AIM_X < START_X and AIM_Y < START_Y, \
+        "the aim offset must sit clearly inside the start offset"
+    assert GAIN <= 1.0, "a gain above 1 overshoots the aim point"
+
+
+def test_start_offset_only_decides_when_to_move():
+    """Moving the start offset must not change the correction for a given
+    offset — it is the trigger, not the magnitude and not the resting point."""
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+    tick(ctrl, servo, 1000.2, face_at(-0.20))
+    baseline = pan_command(servo)
+
+    ctrl2, servo2 = build()
+    ctrl2._framing_start_x = 0.05            # engages much earlier
+    open_session(ctrl2, servo2)
+    tick(ctrl2, servo2, 1000.2, face_at(-0.20))
+
+    assert pan_command(servo2) == baseline, \
+        "the start offset must not scale the correction"
+
+
+def test_gain_only_decides_how_hard_the_correction_pushes():
+    ctrl, servo = build()
+    ctrl._framing_gain = 0.5                 # half the excess per update
+    open_session(ctrl, servo)
+
+    tick(ctrl, servo, 1000.2, face_at(-0.20))
+
+    assert pan_command(servo) == pan_law(-0.20, gain=0.5) == 4
 
 
 # ── Comfort zone: the camera stays still ──
@@ -24,11 +101,12 @@ def test_small_head_movement_does_not_move_the_camera():
     ctrl, servo = build()
     open_session(ctrl, servo)
 
-    for i, dx in enumerate((0.05, -0.10, 0.20, -0.28)):
-        tick(ctrl, servo, 1000.2 + i * 0.4, face_at(dx))
+    for i, (dx, dy) in enumerate(((0.05, 0.0), (-0.10, 0.04),
+                                  (0.14, -0.05), (-0.13, 0.10))):
+        tick(ctrl, servo, 1000.2 + i * 0.4, face_at(dx, dy))
 
     assert not commanded(servo), \
-        "movement inside the comfort zone must leave the PTZ still"
+        "movement inside the start offset must leave the PTZ still"
 
 
 def test_activity_inside_the_comfort_zone_never_moves_the_camera():
@@ -36,85 +114,114 @@ def test_activity_inside_the_comfort_zone_never_moves_the_camera():
     open_session(ctrl, servo)
 
     for i in range(12):                      # drift back and forth across it
-        dx = 0.28 if i % 2 else -0.28
+        dx = 0.14 if i % 2 else -0.14
         tick(ctrl, servo, 1000.2 + i * 0.4, face_at(dx))
 
     assert not commanded(servo)
 
 
-# ── Outer edge: a follow starts, gradually ──
+def test_each_axis_has_its_own_start_offset():
+    """Below the pan start nothing pans, even while the tilt is correcting."""
+    ctrl, servo = build()
+    open_session(ctrl, servo)
 
-def test_the_outer_edge_starts_a_gradual_follow():
+    tick(ctrl, servo, 1000.2, face_at(0.10, 0.30))
+
+    assert not servo.pan_to.called, "0.10 is inside the pan start offset"
+    assert servo.tilt_to.called, "0.30 is past the tilt start offset"
+
+
+# ── Triggered: a prompt, decisive correction ──
+
+def test_crossing_the_start_offset_removes_the_whole_excess_over_the_aim():
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+
+    tick(ctrl, servo, 1000.2, face_at(-0.20))
+
+    assert pan_command(servo) == pan_law(-0.20) == 8, \
+        "one update should take the target from the start offset to the aim offset"
+
+
+def test_the_tilt_correction_matches_the_same_law():
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+
+    tick(ctrl, servo, 1000.2, face_at(0.0, 0.28))
+
+    assert servo.tilt_to.call_args[0][0] - 100 == tilt_law(0.28) == 8
+
+
+def test_the_safety_clamp_is_reachable_again():
+    """The first cut could never reach its own clamps: the largest correction
+    was 9.6 deg pan / 6.2 deg tilt, so there was no headroom to catch up."""
     ctrl, servo = build()
     open_session(ctrl, servo)
 
     tick(ctrl, servo, 1000.2, face_at(-0.45))
 
-    assert servo.pan_to.call_count == 1
-    delta = servo.pan_to.call_args[0][0] - 90
-    assert 0 < delta <= 12, (
-        f"a follow must pull the target back into frame gradually, "
-        f"not jump toward the centre (moved {delta}°)")
+    assert pan_command(servo) == 15, "a large displacement must reach the pan clamp"
 
 
-def test_the_tilt_follows_only_at_the_vertical_edge():
+def test_the_correction_never_overshoots_the_aim_point():
+    """No A-to-B-to-A: correcting past the aim point is what makes a camera
+    oscillate around a target."""
+    for dx in (0.16, 0.20, 0.25, 0.30, 0.40, 0.45, -0.20, -0.35):
+        ctrl, servo = build()
+        open_session(ctrl, servo)
+        tick(ctrl, servo, 1000.2, face_at(dx))
+
+        moved = abs(pan_command(servo)) / FOV_H      # fraction of the width
+        residual = abs(dx) - moved
+        assert residual >= AIM_X - ROUNDING, (
+            f"dx={dx}: correction {moved:.3f} left {residual:.3f}, "
+            f"past the aim offset {AIM_X} (a whole-degree servo may overshoot "
+            f"by up to {ROUNDING:.3f})")
+
+
+# ── Hysteresis between the two offsets ──
+
+def test_a_running_follow_keeps_correcting_between_the_two_offsets():
     ctrl, servo = build()
     open_session(ctrl, servo)
 
-    tick(ctrl, servo, 1000.2, face_at(0.0, 0.25))
-    assert not servo.tilt_to.called, "vertical offset inside the zone is ignored"
-
-    tick(ctrl, servo, 1002.0, face_at(0.0, 0.45))
-    assert servo.tilt_to.called
-    delta = servo.tilt_to.call_args[0][0] - 100
-    assert 0 < delta <= 8
-
-
-# ── Inner edge: the follow stops, and does not chase the centre ──
-
-def test_the_follow_stops_inside_the_frame_and_does_not_centre():
-    ctrl, servo = build()
-    open_session(ctrl, servo)
-
-    tick(ctrl, servo, 1000.2, face_at(-0.45))
-    assert servo.pan_to.call_count == 1
-    moved_to = servo.pan_to.call_args[0][0]
-
-    # The camera moved, so the target is now back near the frame edge.
-    servo.pan = moved_to
-    tick(ctrl, servo, 1002.0, face_at(-0.10))
-
-    assert servo.pan_to.call_count == 1, \
-        "once the target is inside the frame the camera must stop, not centre it"
-
-
-def test_a_running_follow_keeps_correcting_between_the_two_edges():
-    """The gap between the inner and outer edges is the hysteresis band."""
-    ctrl, servo = build()
-    open_session(ctrl, servo)
-
-    # Between the edges with nothing running → still.
-    tick(ctrl, servo, 1000.2, face_at(-0.22))
+    # Between the offsets with nothing running → still.
+    tick(ctrl, servo, 1000.2, face_at(-0.10))
     assert not commanded(servo)
 
-    # Start a follow, then present the same offset → it keeps going.
+    # Engage the follow, then come back inside the start offset → it continues
+    # to the aim offset rather than stopping dead at the start offset.
     tick(ctrl, servo, 1002.0, face_at(-0.45))
     assert servo.pan_to.call_count == 1
-    tick(ctrl, servo, 1004.0, face_at(-0.22))
+    tick(ctrl, servo, 1004.0, face_at(-0.10))
     assert servo.pan_to.call_count == 2, \
-        "a follow already running must keep correcting between the two edges"
+        "a running follow must keep correcting between the two offsets"
 
-    # Back inside the inner edge → the follow stops.
-    tick(ctrl, servo, 1006.0, face_at(-0.10))
+    # At the aim offset → the follow ends.
+    tick(ctrl, servo, 1006.0, face_at(-0.04))
     assert servo.pan_to.call_count == 2
 
-    # And it stays stopped at an offset that is inside the outer edge.
-    tick(ctrl, servo, 1008.0, face_at(-0.22))
+    # And it stays ended at an offset inside the start offset.
+    tick(ctrl, servo, 1008.0, face_at(-0.10))
     assert servo.pan_to.call_count == 2, \
-        "below the outer edge a stopped camera must not start hunting"
+        "inside the start offset a stopped camera must not start hunting"
 
 
-# ── Session lifetime ──
+def test_the_follow_stops_at_the_aim_offset_not_at_the_centre():
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+
+    tick(ctrl, servo, 1000.2, face_at(-0.45))
+    assert servo.pan_to.call_count == 1
+
+    # Settled inside the aim offset → nothing further, and no drive to centre.
+    tick(ctrl, servo, 1002.0, face_at(-0.04))
+
+    assert servo.pan_to.call_count == 1, \
+        "once the target is inside the aim offset the camera must stop"
+
+
+# ── Session lifetime (unchanged by this fix) ──
 
 def test_the_session_is_not_opened_by_a_detection_alone():
     ctrl, servo = build()
@@ -165,13 +272,13 @@ def test_objects_alone_are_never_framed():
 
 # ── Tunability ──
 
-def test_the_comfort_zone_is_configurable():
+def test_the_offsets_are_configurable():
     ctrl, servo = build()
-    ctrl._framing_outer_x = 0.10
-    ctrl._framing_inner_x = 0.05
+    ctrl._framing_start_x = 0.30             # a much larger comfort zone
     open_session(ctrl, servo)
 
     tick(ctrl, servo, 1000.2, face_at(-0.20))
+    assert not servo.pan_to.called, "inside the configured start offset"
 
-    assert servo.pan_to.called, \
-        "an offset outside the configured outer edge must start a follow"
+    tick(ctrl, servo, 1002.0, face_at(-0.40))
+    assert pan_law(-0.40) == 15 and servo.pan_to.called

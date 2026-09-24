@@ -87,12 +87,17 @@ on the 1.5s `_track_interval`, decoupled from the 8s revisit gate. Seeing a face
 or a person is not by itself a reason to follow it.
 
 - Face bbox preferred over YOLO person bbox
-- **Framed, not centred**: a comfort zone (|dx| ≤ 0.15, |dy| ≤ 0.20) absorbs
-  small movement; the outer edge (0.30) starts a follow, the inner edge stops
-  it. The band between the two is the hysteresis
-- A correction is `gain (0.5) × the excess over the inner edge` and aims at the
-  inner edge, never at the centre: `pan_delta = -step_x × FOV × gain`,
-  `tilt_delta = step_y × FOV × h/w × gain`
+- **Framed, not centred**, through three independent knobs: `start_offset`
+  (nothing moves below it), `aim_offset` (where a triggered follow takes the
+  target — the residual it leaves) and `gain` (how much of the remaining excess
+  one update removes). One threshold cannot serve all three roles: a large
+  comfort zone would then also force a late trigger and a weak correction, which
+  is how this first shipped — a 192px trigger, half the correction and a 96px
+  residual
+- Current values: pan start 0.15 / aim 0.06, tilt start 0.20 / aim 0.08, gain
+  1.0 — the largest gain that cannot overshoot the aim point, and the value at
+  which the ±15°/±8° safety clamps become live again
+- `pan_delta = -step_x × FOV × gain`, `tilt_delta = step_y × FOV × h/w × gain`
 - Tilt fatigue: >155° weakens downward push (gain 1.0→0.25)
 - Tilt recovery: >150° for 90s → auto pull back to 120°
 - Presence signal (`_last_track_hit < 15s`) extends stay duration, and is what
