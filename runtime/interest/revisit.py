@@ -552,7 +552,7 @@ class RevisitController:
                 familiarity=getattr(target, 'familiarity_score', 0),
             )
             if abs(d_pan) > 3:
-                self._turn(direction, abs(int(d_pan)))
+                self._turn(direction, abs(int(d_pan)), now)
                 self._last_turn_direction = direction
                 self._last_move = now
                 self._staying_since = 0.0
@@ -568,7 +568,7 @@ class RevisitController:
             logger.info("Revisit [legacy]: %s (score=%.3f, d_pan=%.0f° → %s %d°)",
                         tid, score, d_pan, direction, abs(int(d_pan)))
             if abs(d_pan) > 3:
-                self._turn(direction, abs(int(d_pan)))
+                self._turn(direction, abs(int(d_pan)), now)
                 self._last_turn_direction = direction
                 self._last_move = now
                 self._staying_since = 0.0

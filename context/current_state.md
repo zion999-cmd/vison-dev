@@ -10,7 +10,7 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **336 passed, 0 failed**（`conda run -n vision-dev python -m pytest -q`） |
+| Code regression | **340 passed, 0 failed**（`conda run -n vision-dev python -m pytest -q`） |
 | Hardware baseline | **PARTIAL**：观测有效性部分仍需复验（Test B 未覆盖 / BI-10、BI-11 已修待复验）；**PTZ 部分 PASSED**（2026-09-24 14:03 实机 A/B 对照，见 BI-14） |
 | 分支 | `fix/frame-diff-and-dead-code`（未 merge、未 push） |
 

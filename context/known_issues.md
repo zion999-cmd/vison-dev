@@ -18,7 +18,7 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **336 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
+| Code regression | **340 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
 | Hardware baseline | **PARTIAL**：2026-09-24 07:15 那次 Test A 通过 / Test B **未覆盖** / Test C 暴露 BI-10、BI-11（两条已修，待复验）；**PTZ 部分 PASSED** —— 2026-09-24 14:03 实机 A/B 对照，见 BI-14 |
 | 实机运行 | 5 次：07:15:32（13m14s，3873 帧）、14:03:34 / 14:11:47（各 ~7m，A/B 对照）、15:52:58（7m26s，走动 A/B，**判定 INVALID**）、17:28:25（5m43s，BI-15 验证） |
 | 分支 | `fix/frame-diff-and-dead-code`（未 merge、未 push） |
@@ -137,6 +137,18 @@
 - **证据（测试）**：`tests/test_anchor_leave_ownership.py` 7 例 —— 三个触发分支各一例（flat / sparse / VLM）证明 active commitment 存活；一例证明存活的 session 仍在收图（断言 `pan+10` 是 framing 修正而非 explore 转向）；两例证明 anchor 自己的 leave 行为不变（interest 归零、stay 结束、不重新进入）；一例证明人离开时 commitment 仍能正常 RELEASE（不是永生）。
 - **证据（实机，`runtime_20260924_172825.log`，343s）**：`Flat interest` 触发**两次**（t=213 `anchor_120_90`、t=333 `anchor_80_90`）；结果 `Commitment Start` **仅 1 次**（t=80）、`RELEASE`/`SWITCH` **0 次**、`Revisit [turn]`（explore 转向）**0 次**。第一次 flat-interest 之后 35s 内仍发生 **35 条 framing 命令**（pan 达 ±15°、tilt 达 ±8°），即"锚点被判无聊 → 相机继续跟随人"。锚点自身的 leave 也正常：`anchor_120_90`（hot 0.775）被放弃，相机转到 `anchor_80_90` 停留。
 - **状态**：**FIXED（代码 + 实机验证）**
+
+### BI-18 — `_turn()` 签名漂移：丢失追踪后进程崩溃
+- **HARDWARE OBSERVED**（`runtime_20260925_072511.log`，frames=3104，用户实机）：
+  `Commitment RELEASE` → `Revisit [leave]: anchor_20_105 tier=idle int=0.130 ... → boring, move on`
+  → `Revisit [pick]: entity=ent_5fb39d01(c=0.19,...) → entity` → `Revisit [entity]: ent_5fb39d01 (score=0.194, d_pan=-5° → left 5°)`
+  → `TypeError: RevisitController._turn() missing 1 required positional argument: 'now'` → **进程退出**。
+  即"人离开 → 丢失追踪 → stay 结束 → 好奇心重新拾起一个实体目标"必然崩溃。
+- **根因**：`_turn` 在 c9593a8（Motion Layer）改为经 `self._motion.explore_pan_by(delta, now)` 时新增第三参数 `now`，**5 个调用点只改了 3 个**；entity（`revisit.py:555`）与 legacy（`:571`）两条转向分支漏改。这两条分支此前**零测试覆盖**，缺陷因此潜伏，直到该组合首次出现。
+- **修复**：两处补 `now`，未改动任何逻辑、参数或其它分支。
+- **证据（测试）**：`tests/test_revisit_turn_paths.py` —— entity / legacy 各一例（断言转向进入 Motion Layer、次日帧走到舵机、`pan_to(70)` 为 30° 限速步进）+ 一例 `|d_pan| ≤ 3` 不转向；**修复前两例以与实机逐字相同的 TypeError 失败**。
+- **结构守卫**：`tests/test_revisit_call_sites.py` —— AST 遍历 `revisit.py`，把每个 `self.<method>(...)` 调用与导入后的真实签名做 arity 比对（正确处理 `@staticmethod`、关键字实参，跳过 `*args`/`**kwargs` 与非方法属性）。这类"改签名漏改调用点"错误从此在 CI 层面即可拦截；同一审计在全 `runtime/` 范围内执行，修复后 **0 处不匹配**（说明这是当时唯一一例）。
+- **状态**：**FIXED（代码 + 回归测试）**
 
 ### BI-17 — 1.5s 同时限制 decision 与 active-follow motion update
 - **来源**：用户实机感受"追不上"→ chase-capacity audit（见 BI-16 的实机数据）。实测量：`_acquire_track_target` 的 1.5s 节流同时闸住两个调用者（`_framing_update` 逐帧执行路径与 `_track_target` 建立路径），且 `_last_track` 只在**发出修正**时推进 → 语义是"两次有效修正之间至少 1.5s"，即 motion goal 更新率 = 0.67Hz。而 `PtzMotion.step()` 本就每帧运行、每轴支持 20°/帧 = 100°/s —— 执行侧的能力远大于它被允许使用的。
