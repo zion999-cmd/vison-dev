@@ -1,7 +1,7 @@
 """
 Utils - API Wrappers
 Two separate backends:
-  - oc2api (:31498) for text LLM
+  - 火山方舟 Agent Plan (chat_completions) for text LLM
   - zero-token proxy (:3001) for vision VLM
 """
 
@@ -21,7 +21,7 @@ logger = logging.getLogger("API")
 
 
 class TextAPI:
-    """Text-only LLM via oc2api (local inference)."""
+    """Text-only LLM via the ARK Agent Plan endpoint (OpenAI-compatible)."""
 
     def __init__(self):
         self.base_url = TEXT_API_BASE.rstrip("/")
