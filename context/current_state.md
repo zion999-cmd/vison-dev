@@ -10,7 +10,7 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **333 passed, 0 failed**（`conda run -n vision-dev python -m pytest -q`） |
+| Code regression | **336 passed, 0 failed**（`conda run -n vision-dev python -m pytest -q`） |
 | Hardware baseline | **PARTIAL**：观测有效性部分仍需复验（Test B 未覆盖 / BI-10、BI-11 已修待复验）；**PTZ 部分 PASSED**（2026-09-24 14:03 实机 A/B 对照，见 BI-14） |
 | 分支 | `fix/frame-diff-and-dead-code`（未 merge、未 push） |
 
@@ -30,7 +30,7 @@
 - [x] Baseline Integrity 维护（BI-01~BI-09）：帧所有权、观测有效性契约（OBSERVED / NOT OBSERVED / STALE）、objects 与 anchor_novelty 的 partial-update 语义、离开防抖、reset 语义 — 代码层完成，`281 passed`，**hardware baseline NOT validated**
 - [x] 仓库安全重建：config.py 移出 git（密钥），新增 config.example.py，远端为干净单 commit 历史
 - [x] L6 文字 LLM 迁移到 Hermes 默认 provider（volcengine-plan / ark-code-latest，key 只走环境变量）；删除不可用的 DashScope VLM 后端
-- [x] PTZ：跟踪节奏与 8s revisit gate 解耦（BI-12）、PTZ Motion Layer 单写入者 + 仲裁 + 限速（BI-13）、Gentle Framing keep-in-frame（BI-14）、三旋钮解耦 start/aim/gain（BI-16）、anchor 判断不再销毁 person commitment（BI-15）—— 后三条均实机验证
+- [x] PTZ：跟踪节奏与 8s revisit gate 解耦（BI-12）、PTZ Motion Layer 单写入者 + 仲裁 + 限速（BI-13）、Gentle Framing keep-in-frame（BI-14）、三旋钮解耦 start/aim/gain（BI-16）、anchor 判断不再销毁 person commitment（BI-15）、1.5s decision 节奏与 active-follow motion update 解耦（BI-17，追赶上限由 10°/s 解除）—— 均实机验证
 
 ## 进行中
 

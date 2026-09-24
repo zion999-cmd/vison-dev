@@ -4,10 +4,18 @@ Hardware evidence (runtime_20260924_071532.log): PTZ commands were issued
 every ~8-9s while tracking, though _track_interval is 1.5s — every
 _track_target() call site sat behind the revisit_interval gate in tick().
 
-The decoupling is conditional, and deliberately so: a detection does not open
-a tracking session (that is the revisit/commitment flow's decision), but once
-one is open its movement updates run on the track interval, whatever the
-revisit gate is doing.
+Three cadences are now separate, and the tests below pin each one:
+
+  session   — opened only by the revisit/commitment flow, never by a detection
+  decision  — _track_interval (1.5s): may a follow start? Measured from the last
+              emitted correction, so after a follow ends the controller looks
+              again at most 1.5s later
+  execution — a follow that is already engaged refreshes its motion goal on
+              every valid observation. Capping this at 1.5s is what limited the
+              chase to 10 deg/s pan / 5.33 deg/s tilt and let a walking person
+              outrun the camera (runtime_20260924_172825.log, segment t=228-240s:
+              target 10.7 deg/s median, demand 9.8 deg/s, 1.71s updates,
+              200px median / 309px peak trailing error).
 """
 import sys
 
@@ -41,29 +49,36 @@ def test_tracking_leaves_the_revisit_clock_alone():
     assert ctrl._last_revisit == 1000.0, "tracking must not reset the revisit clock"
 
 
-def test_tracking_still_honours_the_track_interval():
+def test_an_engaged_follow_updates_faster_than_the_decision_cadence():
+    """The decision cadence must not cap the motion update of a live follow."""
     ctrl, servo = build()
     open_session(ctrl, servo, 1000.0)
 
-    tick(ctrl, servo, 1001.6, face_at(OFF_CENTRE))
+    tick(ctrl, servo, 1001.6, face_at(OFF_CENTRE))        # engages the follow
     assert servo.pan_to.call_count == 1
 
     tick(ctrl, servo, 1002.6, face_at(OFF_CENTRE))        # only 1.0s later
 
-    assert servo.pan_to.call_count == 1, \
-        "one command per _track_interval at most"
+    assert servo.pan_to.call_count == 2, \
+        "an engaged follow must refresh its goal at the observation rate"
 
 
-def test_tracking_resumes_once_the_track_interval_elapses():
+def test_the_decision_cadence_still_gates_re_engagement():
+    """After a follow ends, the 1.5s decision cadence still applies."""
     ctrl, servo = build()
     open_session(ctrl, servo, 1000.0)
 
-    tick(ctrl, servo, 1001.6, face_at(OFF_CENTRE))
-    assert servo.pan_to.call_count == 1
+    tick(ctrl, servo, 1001.6, face_at(OFF_CENTRE))        # engage; _last_track set
+    tick(ctrl, servo, 1002.0, face_at(-0.04))             # inside the aim zone -> stop
+    assert not ctrl._following()
+    servo.pan_to.reset_mock()
 
-    tick(ctrl, servo, 1003.2, face_at(OFF_CENTRE))
+    tick(ctrl, servo, 1002.6, face_at(OFF_CENTRE))        # 1.0s after the last move
+    assert not commanded(servo), \
+        "inside the cadence window the decision is not re-taken"
 
-    assert servo.pan_to.call_count == 2
+    tick(ctrl, servo, 1003.4, face_at(OFF_CENTRE))        # 1.8s after the last move
+    assert servo.pan_to.called, "past the cadence the decision is taken again"
 
 
 def test_no_command_while_the_camera_is_moving():

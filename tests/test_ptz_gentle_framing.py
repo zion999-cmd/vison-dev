@@ -282,3 +282,55 @@ def test_the_offsets_are_configurable():
 
     tick(ctrl, servo, 1002.0, face_at(-0.40))
     assert pan_law(-0.40) == 15 and servo.pan_to.called
+
+# ── Execution cadence: separate from the decision cadence ──
+
+def test_a_follow_updates_its_goal_at_the_observation_cadence():
+    """While FOLLOWING, every valid observation may move the goal. The 1.5s
+    decision cadence must not gate the motion update — that is what capped the
+    chase rate at 10 deg/s pan and let a walking person outrun the camera."""
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+
+    tick(ctrl, servo, 1000.2, face_at(-0.30))       # crosses the start offset
+    assert ctrl._following(), "crossing the start offset engages a follow"
+    assert servo.pan_to.call_count == 1
+
+    tick(ctrl, servo, 1000.6, face_at(-0.35))       # 0.4s later — well inside 1.5s
+    assert servo.pan_to.call_count == 2, \
+        "an engaged follow must refresh its goal at the observation rate"
+
+    tick(ctrl, servo, 1001.0, face_at(+0.35))       # 0.4s later, target swung back
+    assert servo.pan_to.call_count == 3
+
+
+def test_rapid_updates_keep_one_goal_and_leave_no_backlog():
+    """One command per observation, latest goal wins, nothing left pending."""
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+    emitted = []
+    servo.pan_to.side_effect = lambda a: emitted.append(a)
+
+    for i, dx in enumerate((-0.30, -0.40, -0.45, -0.50)):
+        tick(ctrl, servo, 1000.2 + i * 0.2, face_at(dx))
+
+    assert len(emitted) == 4, "one command per observation, never a queue"
+    assert not ctrl._motion.pending(), "no stale goal may be left pending"
+    assert emitted[-1] == 90 + 15, \
+        "the last update must win: dx=-0.50 is clamped to +15 from the last position"
+
+
+def test_jitter_inside_the_start_offset_does_not_restart_a_follow():
+    """After a follow stops, sub-threshold movement must not re-engage it."""
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+    tick(ctrl, servo, 1000.2, face_at(-0.30))       # engage
+    tick(ctrl, servo, 1000.6, face_at(-0.04))       # back inside the aim zone -> stop
+    assert not ctrl._following()
+    servo.pan_to.reset_mock()
+
+    for i, dx in enumerate((-0.10, 0.12, -0.09, 0.14, -0.05)):
+        tick(ctrl, servo, 1002.0 + i * 0.2, face_at(dx))
+
+    assert not commanded(servo), \
+        "movement inside the start offset must never restart a follow"

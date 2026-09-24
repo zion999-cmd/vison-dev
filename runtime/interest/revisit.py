@@ -667,16 +667,40 @@ class RevisitController:
         self._commitment_engine.confirm(now)
         self._aim(now, target)
 
+    def _following(self) -> bool:
+        """True while a follow is engaged on either axis.
+
+        Engagement is edge-triggered by the spatial hysteresis in
+        `_framing_step`: a target inside the start offset never engages, so a
+        faster motion update cannot make the camera react to bbox jitter — it
+        only applies to a follow that is already correcting. That separation is
+        what lets the execution cadence differ from the decision cadence.
+        """
+        return self._framing_pan or self._framing_tilt
+
     def _acquire_track_target(self, now: float):
         """The face or person to frame, as (cx, cy, label), or None.
 
         Also records the presence signal (`_last_track_hit`) that the session
         gate and the sweep's tilt-levelling guard both read. The face bbox is
         preferred over the YOLO person bbox — it is the more precise of the two.
+
+        Two cadences are deliberately separate here. The revisit cadence gates
+        the *decision* — may a follow start? — and applies while nothing is
+        engaged. An engaged follow refreshes its motion goal on every valid
+        observation: capping that at _track_interval limited the chase to one
+        correction per 1.5s, i.e. 10 deg/s pan and 5.33 deg/s tilt, which a
+        walking person outruns (2026-09-24 17:28, t=228-240s: the target moved
+        at 10.7 deg/s median while the camera could answer only 9.8 deg/s in
+        1.71s steps, leaving a 200px median trailing error).
+
+        Updating faster is safe by construction: PtzMotion coalesces (latest
+        goal wins), never queues, and still rate-limits to MAX_STEP_DEG per
+        frame, so a faster goal cannot become a backlog of relative nudges.
         """
         if self._servo_ptz is None or self._servo_ptz.moving:
             return None
-        if now - self._last_track < self._track_interval:
+        if not self._following() and now - self._last_track < self._track_interval:
             return None
 
         # Use pre-computed detections from main loop (avoids duplicate ONNX inference)

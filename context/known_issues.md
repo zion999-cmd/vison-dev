@@ -18,7 +18,7 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **333 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
+| Code regression | **336 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
 | Hardware baseline | **PARTIAL**：2026-09-24 07:15 那次 Test A 通过 / Test B **未覆盖** / Test C 暴露 BI-10、BI-11（两条已修，待复验）；**PTZ 部分 PASSED** —— 2026-09-24 14:03 实机 A/B 对照，见 BI-14 |
 | 实机运行 | 5 次：07:15:32（13m14s，3873 帧）、14:03:34 / 14:11:47（各 ~7m，A/B 对照）、15:52:58（7m26s，走动 A/B，**判定 INVALID**）、17:28:25（5m43s，BI-15 验证） |
 | 分支 | `fix/frame-diff-and-dead-code`（未 merge、未 push） |
@@ -136,6 +136,28 @@
 - **修复**：删除该 `reset()` 调用。commitment 只能由它自己的语义结束（`decide()` 的 lost / stale / timeout / SWITCH）。未改动 Commitment、acquisition、Framing、Motion Layer、任何参数。
 - **证据（测试）**：`tests/test_anchor_leave_ownership.py` 7 例 —— 三个触发分支各一例（flat / sparse / VLM）证明 active commitment 存活；一例证明存活的 session 仍在收图（断言 `pan+10` 是 framing 修正而非 explore 转向）；两例证明 anchor 自己的 leave 行为不变（interest 归零、stay 结束、不重新进入）；一例证明人离开时 commitment 仍能正常 RELEASE（不是永生）。
 - **证据（实机，`runtime_20260924_172825.log`，343s）**：`Flat interest` 触发**两次**（t=213 `anchor_120_90`、t=333 `anchor_80_90`）；结果 `Commitment Start` **仅 1 次**（t=80）、`RELEASE`/`SWITCH` **0 次**、`Revisit [turn]`（explore 转向）**0 次**。第一次 flat-interest 之后 35s 内仍发生 **35 条 framing 命令**（pan 达 ±15°、tilt 达 ±8°），即"锚点被判无聊 → 相机继续跟随人"。锚点自身的 leave 也正常：`anchor_120_90`（hot 0.775）被放弃，相机转到 `anchor_80_90` 停留。
+- **状态**：**FIXED（代码 + 实机验证）**
+
+### BI-17 — 1.5s 同时限制 decision 与 active-follow motion update
+- **来源**：用户实机感受"追不上"→ chase-capacity audit（见 BI-16 的实机数据）。实测量：`_acquire_track_target` 的 1.5s 节流同时闸住两个调用者（`_framing_update` 逐帧执行路径与 `_track_target` 建立路径），且 `_last_track` 只在**发出修正**时推进 → 语义是"两次有效修正之间至少 1.5s"，即 motion goal 更新率 = 0.67Hz。而 `PtzMotion.step()` 本就每帧运行、每轴支持 20°/帧 = 100°/s —— 执行侧的能力远大于它被允许使用的。
+- **后果（实机 `runtime_20260924_172825.log`）**：追赶上限 = ±15°clamp × 1.5s = **10°/s pan、5.33°/s tilt**；目标角速度 median 0.8 / p90 **15.8** / peak 29.5°/s → **19% 的行走时间超过 pan 上限**。98 个 4s 窗口中 24 个目标 >10°/s，相机实测最多只跑到 8°/s，trailing 中位 200px、峰值 309px（距画面边缘 11px）。而且 10°/s 只在目标已经偏离 213px 时才达到（修正量正比于超出 aim 的部分）。
+- **修复**：新增 `_following()`（`_framing_pan or _framing_tilt`），节流改为 `if not self._following() and now - self._last_track < self._track_interval`。即 **decision 节奏**（1.5s，follow 未建立时决定"要不要开始跟"）与 **execution 节奏**（follow 已建立 → 每个有效观测刷新 motion goal）分离。hysteresis、start/aim/gain、±15°/±8°、1.5s 数值、Motion Layer、固件全部未动。
+- **为什么不会重新引入 bbox jitter → PTZ jitter**：follow 的建立是空间滞后的边沿触发（|offset| > start_offset，96px），bbox 噪声（YuNet 实测 ±13–26px）越不过去；且 follow 在目标回到 aim 点（38px）时立即退出。闭环仿真（真实 controller + 模拟走动 + 噪声）：静止目标 + 噪声 0.02/0.04 → **命令数 0**；移动目标加噪声反而命令数更少（噪声让修正更早落进 aim 区、follow 更早退出）。
+- **证据（测试）**：`tests/test_ptz_gentle_framing.py` 新增 3 例（engaged follow 按观测节奏更新、rapid updates 一观测一命令且无 backlog、follow 停止后 sub-threshold 抖动不得重启）；`tests/test_revisit_tracking_cadence.py` 两例改写为新契约（engaged follow 不受 1.5s 限制 / 1.5s 仍约束 follow 结束后的重新决策）。全套 336 passed。
+- **证据（实机 `runtime_20260924_175145.log`，423s，用户持续走动）**：
+
+  | 指标 | 旧（17:28） | 新（17:51） |
+  |---|---|---|
+  | framing 修正数 | 34 | **117** |
+  | trailing error p90 / max | **225px / 309px** | **91px / 266px** |
+  | 舵机行程 | 5.7s（1.7%） | 5.8s（**1.4%**） |
+  | ego_motion 帧 | 3.0% | 3.1% |
+  | 首个命令延迟（运动起始后） | 1.37s | **0.94s** |
+  | A-B-A 反转 | 0 / 48 | 1 / 59 |
+
+  同速率对比（最快 4s 窗口，目标 11.6–13.2°/s）：相机达 **12.25–17.0°/s**（旧代码在 10.74°/s 目标下只能给 9.83°/s 且已顶到上限），trailing 中位 **68–94px**（旧 S2 为 200px）。
+- **自扰动复核（关键）**：117 条修正中，**|dx| ≤ aim(0.06) 的 pan 修正 = 0 条，|dy| ≤ aim(0.08) 的 tilt 修正 = 0 条**；修正频率随目标自身角速度单调上升（几乎静止 0.08/s → 慢 0.50/s → 走动 1.87/s → 快 2.67/s），是"追踪者"而非"抖动者"的特征。**未出现高频自扰动。**
+- **遗留（本轮冻结项，非缺陷）**：tilt 轴更紧 —— 29/110 条 tilt 修正在 ±8° clamp 饱和（pan 仅 2/37）。原因：8°/41.25 = 0.194 归一化偏移即饱和，而 pan 是 15/55 = 0.273。tilt 需要 ~2 次修正才能完成一次大偏移（同一方向、<1s 的成对修正 56 次，即收敛而非抖动）。
 - **状态**：**FIXED（代码 + 实机验证）**
 
 ### BI-16 — Gentle Framing 用单一阈值同时决定 trigger / correction / residual

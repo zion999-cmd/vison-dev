@@ -80,11 +80,17 @@ CANDIDATE (5 sightings to promote) → ACTIVE → LOST (30 misses) → FORGOTTEN
 
 ### PTZ Tracking (gentle framing in revisit.py)
 
-A **tracking session** is opened only by the revisit/commitment flow — never by
-a detection. `_track_target()` (the sole caller of `CommitmentEngine.begin()`)
-establishes one from the stay-at-anchor path; `_framing_update()` then aims it
-on the 1.5s `_track_interval`, decoupled from the 8s revisit gate. Seeing a face
-or a person is not by itself a reason to follow it. An
+Three cadences are deliberately separate. A **tracking session** is opened only
+by the revisit/commitment flow — never by a detection: `_track_target()` (the
+sole caller of `CommitmentEngine.begin()`) establishes one from the
+stay-at-anchor path. The **decision** cadence (`_track_interval`, 1.5s, measured
+from the last emitted correction) decides whether a follow may start. The
+**execution** cadence is the observation rate: an engaged follow refreshes its
+motion goal on every valid observation, rate-limited by the motion layer. Capping
+the execution at 1.5s was what limited the chase to 10°/s pan and 5.33°/s tilt —
+a person walking at conversational distance exceeds that, and no trailing error
+can close the gap above it. Seeing a face or a person is not by itself a reason
+to follow it. An
 anchor-level judgement (flat interest / sparse classes / VLM "trivial") ends the
 stay but never clears the commitment: that belongs to the person being watched
 and ends only on lost / stale / timeout.
