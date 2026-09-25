@@ -2,6 +2,33 @@
 
 > 当前开发进度和状态。每次会话结束更新。
 
+## 🔒 P0008.1 实验基线已冻结（2026-09-25）
+
+**本基线是被冻结的"当前状态"，不是"完成状态"。已知缺陷一律保留，不修。**
+
+| 项 | 值 |
+|----|-----|
+| 冻结点 | `a4f20ff`（分支 `fix/frame-diff-and-dead-code`） |
+| 冻结前一步 | `cf7c36a`（BI-19）、`8f4e49d`（BI-18） |
+| 最近一次全套测试 | **347 passed, 0 failed**（冻结提交为纯文档改动，不影响该结果） |
+| 分支 upstream | **无**（`master` 跟踪 `origin/master` = `c1fe056`；本分支尚未推到远端） |
+
+**已实机确认可用的部分**
+- P0008.1 tracking session 能长期保持（实机单 session 连续 720s / 57 次仲裁全部 HOLD）。
+- Gentle Framing / PTZ 执行在硬件上工作：小动作不动、真移动才追、跟随中按观测率刷新。
+- **三个时间尺度已分离**：session（revisit/commitment 流程建立）、decision（8s `revisit_interval` 闸门；实测 4.3 次/分）、execution（engaged follow 按观测率刷新，实测 300 次/分 @5FPS）。
+- BI-19（不用"自己动作之前的画面"做修正 + face 参考点一致性）**实机验证通过**：0 条基于陈旧帧的修正、0 次 face/person 参考切换。
+- BI-20（决策节奏）**测试 + 实机验证通过**。
+
+**Startup Lifecycle 审计已完成 —— 当前 startup 是隐式的**
+现状不是显式的 runtime lifecycle，而是：`RevisitController` 的 60s `startup_phase` 闸门 + 定时 sweep（`_SWEEP_SEQUENCE`，8s 间隔）+ stay 条件。没有独立的启动/初始化阶段，视觉环境建立（房间无人时的基线勘察）不复存在 —— `EnvironmentScanner` 是孤儿模块（见 DEFERRED）。
+
+**下一步方向：启动期视觉环境建立 / initialization**，**不是**继续调 Commitment。
+
+**未解决项一律保留**，完整清单见 [known_issues.md](known_issues.md)（OPEN-CONFIRMED / VERIFY / DEFERRED）。其中与下一步直接相关的：multi-person framing 无稳定 target identity、challenger 结构性缺席、饱和 commitment 使 SWITCH 判据不可达、RELEASE/reacquire 链未被实机触发、Arduino/PTZ degraded mode、startup lifecycle 未实现。
+
+---
+
 ## 版本
 
 0.1.0

@@ -1,59 +1,58 @@
-# Handoff: 2026-08-16
+# Handoff: 2026-09-25 — P0008.1 实验基线冻结
 
-## 当前状态
+> 上一份 handoff（2026-08-16，P0008.1 实现期）已被本文件取代；其内容在 git 历史中可查。
+> 完整问题登记见 [known_issues.md](known_issues.md)，当前状态见 [current_state.md](current_state.md)。
 
-- 分支: master（远端已重建为干净单 commit，见下）
-- 测试: 244 pass / 4 pre-existing flaky（camera_state×2, focus_manager, scene_state）
+## 一句话
 
-## 本次会话做了什么
+**P0008.1 现状作为下一阶段的实验基线被冻结**。已知缺陷**一律保留、未修**：冻结不是"整理仓库"，是"把当前位置存下来"。
 
-### 1. Git 安全清理（密钥）
+## 恢复点
 
-- 远端 `zion999-cmd/vison-dev` 原包含 `config.py` 明文密钥（EZVIZ / dashscope / gateway qwen），已删除远端并重建
-- `config.py` 加入 `.gitignore`（本地保留），新增 `config.example.py`（密钥走环境变量）
-- 完整旧历史备份在 `/tmp/vision-dev-backup.bundle`（420K）
-- 当前远端为单条干净 commit（历史中无 config.py）
-- 提醒：若旧仓库曾 public，密钥仍建议轮换
+| 项 | 值 |
+|----|-----|
+| 分支 | `fix/frame-diff-and-dead-code` |
+| HEAD | `a4f20ff`（decision cadence 修复）|
+| 上一提交 | `cf7c36a`（BI-19）、`8f4e49d`（BI-18 崩溃修复）|
+| 全套测试 | **347 passed, 0 failed**（`conda run -n vision-dev python -m pytest -q`）|
+| 相对 master | 领先 18 个 commit，落后 0；`master` = `origin/master` = `c1fe056` |
+| 本分支 upstream | **无** —— 尚未推到远端；推送目标需先确定，不要凭猜设置 upstream |
 
-### 2. P0008.1: Commitment / Dwell Policy
+## 环境
 
-**状态**: Implemented — unit tests 19/19 通过；**Hardware validation: Pending**（Scenario A/B/C 未在硬件验证）。
+- conda env `vision-dev`；`config.py` 是 git-ignored，从 `config.example.py` 拷贝，密钥只走环境变量。
+- 硬件：Arduino SG90 云台在 `/dev/tty.usbserial-A600J5V6`（pan 10–165，tilt 95–170），摄像头 index 0。
+- 跑测试/运行必须走 conda env。
 
-解决 **Commitment Gap**：Runtime 会"决定看什么"，但不会"决定看多久"。注意力 span 平均 ~24s（explore 42% + switched 41%），根因是 Curiosity 公式的 freshness/uncertainty/(1−familiarity) 对持续在场的人塌缩为 0。设计见 `proposals/P0008.1-commitment-dwell-policy.md`。
+## 这一轮之后，什么已经被实机确认
 
-**新文件：**
-- `runtime/commitment/engine.py` — CommitmentState, Decision(HOLD/SWITCH/RELEASE), CommitmentEngine（compute_commitment + decide）
-- `runtime/commitment/telemetry.py` — CommitmentTelemetry（start/hold/switch/release）
-- `runtime/commitment/__init__.py`
-- `tests/test_commitment.py` — 19 tests
+1. **tracking session 能长期保持**：单 session 连续 720s，57 次仲裁全 HOLD。
+2. **Gentle Framing 在硬件上工作**：小动作不动、真移动才追、跟随中按观测率刷新 goal。
+3. **三个时间尺度分离**（这是本轮最实质的架构结果）：
+   - session — 只由 revisit/commitment 流程建立，检测本身不启动跟踪；
+   - decision — 8s `revisit_interval` 闸门，实测 **4.3 次/分**；
+   - execution — engaged follow 按观测率刷新，实测 **300 次/分 @ 5FPS**。
+4. **BI-19**（不用自己动作之前的画面做修正 + face 参考点一致性）实机通过：0 条基于陈旧帧的修正、0 次 face/person 参考切换。
+5. **BI-20**（决策节奏）测试 + 实机通过：HOLD 与 `Revisit [pick]` 1:1，无帧率泄漏。
 
-**修改文件：**
-- `runtime/interest/revisit.py` — 3 处仲裁钩子（anchor-stay 超时 / 切换 / 探索）+ `_commitment_holds()` + `_track_target` 里建立 commitment
-- `runtime/main.py` — 传入 role_engine，30min 周期 flush commitment telemetry
-- `CLAUDE.md` / `doc/README.md` — 登记模块
+## 什么仍然未解决（**下一阶段不要顺手修，除非排进计划**）
 
-### 架构原则（P0008.1 建立）
+- **multi-person framing 没有稳定 target identity**：逐帧 argmax 选脸 → 两人同框时每帧翻转 → 2Hz 摇动（实机 t=476 两秒四次反向）。L4 也没有稳定身份（72 次 `[FOCUS]`、70 个各出现一次的 id、0 次 RELEASE）；framing 完全不消费 Entity 签名身份。
+- **challenger 结构性缺席**：57/57 = 0.00（54/57 次 pick 根本没有候选目标）。
+- **commitment 饱和使 SWITCH 不可达**：score 1.00 vs 阈值 1.15。
+- **RELEASE / reacquire 链从未被实机触发**（最长无目标间隙 2s）。
+- **Arduino / PTZ degraded mode**（无硬件时 `moving` 永久为 True）。
+- **Startup Lifecycle 未实现**：现在的启动是隐式的 60s `startup_phase` + 定时 sweep，没有独立的初始化阶段，也没有"建立房间视觉基线"这一步。
+- 其余 OPEN-CONFIRMED / VERIFY / DEFERRED 条目见 ledger。
 
-1. **Curiosity vs Commitment** — Curiosity 竞争"下一个看什么"，Commitment 保护"当前看什么"
-2. **熟悉 ≠ 不值得陪伴** — Familiarity 不作为 Commitment 的负项
-3. **commitment_score = role + mission + presence − disengagement**（与 Curiosity 公式完全分离）
-4. **仲裁输出仅 HOLD/SWITCH/RELEASE**，SWITCH 需 challenger_curiosity > commitment + SWITCH_MARGIN（迟滞）
+## 下一阶段方向（用户已定）
 
-## 当前阻塞
+**启动期视觉环境建立 / initialization** —— 不是继续调 Commitment。
 
-无
+## 下一阶段不要做的事
 
-## 下一步任务
+不要调 Commitment 阈值、不要动 target identity / challenger / SWITCH 公式 / RELEASE 语义、不要动 Gentle Framing 的 start/aim/gain 与 ±15°/±8°、不要动 Motion Layer 与 1.5s/8s 节奏 —— 这些是**冻结基线的一部分**，改动会让本基线的实机结论失效。需要它们时先开新的任务并重新实机验证。
 
-1. [ ] P0008.1 Hardware validation: Pending（Scenario A/B/C 需接摄像头实测；单测 19/19 通过但未行为验证）
-2. [ ] ChatGPT 审查 P0008.1 代码
-3. [ ] Mission Playground / Persona Divergence
-4. [ ] P0009: Scene Graph
+## 已知的文档小瑕疵（记录、未修）
 
-## 关键上下文
-
-- `PERSONA` / `MISSION_ROLE_PROVIDER` 在 `config.py`（已 gitignore，新克隆需 `cp config.example.py config.py`）
-- Commitment 是 **class-scoped**（target_class="person"），entity_id 绑定为后续优化
-- Commitment 常量在 `runtime/commitment/engine.py` 模块级（SWITCH_MARGIN=0.15, SAFETY_MAX_DWELL=1800 等）
-- 4 个 pre-existing flaky 测试与本次改动无关
-- 历史设计决策见 `proposals/` + `context/decisions.md`
+`known_issues.md` 里 `## OPEN-CONFIRMED` 标题出现两次（早前编辑留下的重复），纯排版问题，冻结期内未动。

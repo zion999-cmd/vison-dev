@@ -21,7 +21,7 @@
 | Code regression | **347 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
 | Hardware baseline | **PARTIAL**：2026-09-24 07:15 那次 Test A 通过 / Test B **未覆盖** / Test C 暴露 BI-10、BI-11（两条已修，待复验）；**PTZ 部分 PASSED** —— 2026-09-24 14:03 实机 A/B 对照，见 BI-14 |
 | 实机运行 | 5 次：07:15:32（13m14s，3873 帧）、14:03:34 / 14:11:47（各 ~7m，A/B 对照）、15:52:58（7m26s，走动 A/B，**判定 INVALID**）、17:28:25（5m43s，BI-15 验证） |
-| 分支 | `fix/frame-diff-and-dead-code`（未 merge、未 push） |
+| 分支 | `fix/frame-diff-and-dead-code` @ `a4f20ff`（**无 upstream**；未 merge 到 master） |
 | 已提交前序 | `73f8ac4` `21d7d47` `ad77f22` `7e7a5ff` `f4d8879` `92a99bb` `0e061e9` `feec2bc` `94dd360` `557ec9f` `c9593a8` |
 
 ---
@@ -212,6 +212,33 @@
 ---
 
 ## OPEN-CONFIRMED
+
+### multi-person framing 没有稳定的 target identity（逐帧 argmax）
+- **HARDWARE OBSERVED**（`runtime_20260925_090432.log`，t=476–478）：pan 轨迹 `86→74→86→71→83→88→93→94` —— **两秒内四次反向、幅度 ±12–15°、约 2Hz**。同一秒内取到的 `dx` 在 **+0.38 与 −0.27** 之间翻转（差 0.65 画幅 = 36°，一个人不可能在 0.5s 内如此移动），且 `faces` 恰在此刻 1↔2 闪烁 → **必然是两张脸之间在切换**。
+- **根因**：`_acquire_track_target` 每帧独立地取 `max(faces, key=confidence)`（或落在 person 框内的那张），**没有记忆、没有迟滞、没有身份绑定**。两张置信度相近的脸 → 逐帧翻转 → framing 每帧要求相反方向 → Motion Layer 忠实地每帧执行一条（BI-17 把执行节奏提到观测率之后，把这变成了 2Hz 的可见摇动）。
+- **影响**：用户实机主观描述"追踪时如果 2 个人同时出现会抖动，PTZ 不知道追谁"。整轮 800s 里 260 帧有 ≥2 张人脸。
+- **补充**：L4 也没有提供稳定的"谁" —— 该轮 `[FOCUS]` 获取 **72 次**、`[RELEASE]`/`[LOST]` **0 次**、**70 个互不相同且各只出现一次的 id**。framing 也完全没有消费 Entity registry 的签名身份。
+- **状态**：未修复（属 target identity / target selection，冻结期内明确不修）。
+
+### challenger 在观察到的 P0008.1 运行中结构性缺席
+- **HARDWARE OBSERVED**（同日志）：57 次仲裁的 `challenger : 0.00` **全部为 0**。`challenger` 只在好奇心层选中 entity/legacy 目标时才非零，而 57 次 pick 里 **54 次是 `entity=none legacy=none`**（结构上没有候选），另外 3 次有 entity 但未被选中 → 仍为 0.00。
+- **影响**：稳定态下"另一个人出现 → 无兴趣唤起"是三层结构性结果，而非阈值没调好。实机：t=118–186 的 68 秒里人脸 1↔2 闪了 72 帧，**servo 命令 0 条**。
+- **状态**：未修复（冻结期内不修）。
+
+### commitment 饱和时 SWITCH 判据不可达
+- **HARDWARE OBSERVED**（同日志）：57 次仲裁的 `commitment : 1.00` 全部饱和（role 0.6 + mission 0.35 + presence 0.2，被 clamp 到 1.0）；`decide()` 的 SWITCH 条件是 `challenger > score + 0.15` → 阈值 **1.15**，而 challenger 的 curiosity 上限约 1.0 → **算术上不可达**。
+- **影响**：只要当前 target 是 person（role=1.0）且 mission boost 在，任何新人都不可能接管。0 次 SWITCH 是结构性的，不是"这次没有值得切换的目标"。
+- **状态**：未修复（属 Commitment 判据，冻结期内不修）。
+
+### RELEASE / reacquire 链未被实机触发
+- **HARDWARE OBSERVED**（同日志）：全程 `Commitment RELEASE` **0 次**、`Commitment SWITCH` **0 次**；最长"无可用检测"间隙 **2 秒**，57 次仲裁 presence 每次都新鲜（<15s）→ RELEASE 的前件从未成立，因此 subject 离开 → RELEASE → 回来 → reacquire 这条链**没有被验证过**。
+- **影响**：P0008.1 的 Scenario B/C（离开 RELEASE、回来 reacquire）在硬件上仍属未验证；不要把"未观察到问题"当成"已验证"。
+- **状态**：未验证（冻结期内不处理）。
+
+### Startup Lifecycle：当前是隐式的，没有独立初始化阶段
+- **审计结论（已完成）**：现在的"启动"不是 runtime lifecycle，而是 `RevisitController` 内部的三件事叠加 —— 60s `startup_phase` 闸门、8s 节奏的定时 sweep（`_SWEEP_SEQUENCE`）、以及 stay 条件（非 startup 窗口 + anchor 在 pan±15° 内 + 非 barren/suppressed + `interest>0.08` + `baseline_objects` 非空）。
+- **影响**：没有"建立视觉环境基线"这一步 —— 房间无人时没有系统性勘察，anchor 是靠 explore 逐渐撞出来的。用户已明确下一阶段方向为**启动期视觉环境建立 / initialization**。
+- **状态**：未实现（冻结期内明确不实现）。
 
 ### tracking session 只能由"停在合格 anchor 上"这一条路径开启
 - **证据**：`_track_target` 的 5 个调用点中，4 个在 `_commitment_holds()` 之后，而 `_commitment_holds` 要求 `has_commitment` 已为真 —— 它们只能**刷新**已有 session，不能建立。唯一能建立的是 stay-at-anchor 分支，前置条件为：非 startup 窗口、anchor 在 pan±15° 内、非 barren、非 suppressed、`interest > 0.08`、`baseline_objects` 非空。
