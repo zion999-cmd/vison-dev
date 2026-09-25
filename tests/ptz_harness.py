@@ -59,8 +59,10 @@ class AnchorManager:
 
 
 def build(now: float = 1000.0, servo=None):
-    """A controller past the 60s startup sweep, with the revisit gate open and
-    an anchor worth staying at — everything the stay path needs."""
+    """A controller with the revisit gate open and an anchor worth staying at —
+    everything the stay path needs. There is no startup window to get past any
+    more: startup is the visual-environment bootstrap's lifecycle, and when a
+    survey owns the axes it does so through the Motion Layer."""
     if servo is None:
         servo = MagicMock()
         servo.moving = False
@@ -69,7 +71,6 @@ def build(now: float = 1000.0, servo=None):
     ctrl = RevisitController(interest_engine=MagicMock(), servo_ptz=servo,
                              camera_state=MagicMock())
     ctrl._engine.next_revisit.return_value = None
-    ctrl._started_at = now - 120.0     # past the startup sweep window
     ctrl._last_revisit = 0.0           # revisit gate open
     ctrl._anchor_manager = AnchorManager()
     return ctrl, servo

@@ -108,24 +108,22 @@ def test_no_command_without_a_face_or_person():
 def test_idle_still_returns_at_the_revisit_gate():
     ctrl, servo = build()
     ctrl._last_revisit = 1000.0       # gate closed, no session
-    ctrl._started_at = 0.0
 
     ctrl.tick(1000.0, faces=[], objects=[])
 
     assert not commanded(servo)
-    assert ctrl._started_at == 0.0, \
+    assert ctrl._last_revisit == 1000.0, \
         "with no detections tick must still stop at the revisit gate"
 
 
 def test_idle_proceeds_once_the_revisit_interval_elapses():
     ctrl, servo = build()
     ctrl._last_revisit = 1000.0 - 8.0   # gate open
-    ctrl._started_at = 0.0              # startup clock not started yet
 
     ctrl.tick(1000.0, faces=[], objects=[])
 
-    assert ctrl._started_at == 1000.0, \
-        "the revisit path must still open on its 8s cadence"
+    assert ctrl._last_revisit == 1000.0, \
+        "the revisit path must still consume the gate on its 8s cadence"
 
 
 def test_revisit_interval_is_unchanged():

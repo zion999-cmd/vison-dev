@@ -92,7 +92,6 @@ class RevisitController:
 
         self._last_revisit = 0.0
         self._last_move = 0.0
-        self._started_at = 0.0
         self._staying_since = 0.0
         self._max_stay = 300.0
         self._vlm_empty_check_s = 90.0
@@ -202,13 +201,12 @@ class RevisitController:
         if self._servo_ptz.moving:
             return  # camera is busy
 
-        # Track startup time for initial explore phase
-        if self._started_at == 0.0:
-            self._started_at = now
-
         # ── Stay check: if already looking at something interesting, don't move ──
-        startup_phase = (now - self._started_at) < 60.0
-        if not startup_phase and self._anchor_manager:
+        # No startup window gates this any more: whether the camera may settle
+        # is decided by the anchors, and whether the camera is free at all is
+        # decided by the Motion Layer's ownership (the startup survey holds it
+        # until the visual environment bootstrap reaches READY).
+        if self._anchor_manager:
             for a in self._anchor_manager.all_anchors():
                 if abs(a.pan - self._servo_ptz.pan) < 15:
                     # Has objects AND interest → stay. Empty anchor → don't stay.
@@ -381,32 +379,12 @@ class RevisitController:
                         a.barren_at = now
                     break
 
-        # ── Discovery: sweep exploration with alternating left/right turns ──
-        # New system has no position feedback — use duration-based sweeps.
-        # Sweep sequence: alternating left/right, increasing degrees
-        startup_phase = (now - self._started_at) < 60.0
-        if startup_phase and now - self._last_move > 8.0:
-            deg = self._SWEEP_SEQUENCE[self._sweep_idx % len(self._SWEEP_SEQUENCE)]
-            self._sweep_idx += 1
-            direction = 'left' if deg < 0 else 'right'
-            # Explore at level, not at tracking tilt — but only when nothing
-            # has been tracked recently. Levelling the tilt while a target is
-            # still around yanks it away from the follow, and the ~29° it then
-            # has to re-correct through a ±8° clamp saturates for 3-4 commands
-            # every cycle. Detection misses leave multi-second gaps inside a
-            # follow, so the motion layer's short ownership hold is not enough
-            # on its own; use the existing presence window.
-            if now - self._last_track_hit >= PRESENCE_WINDOW:
-                self._motion.explore(now, tilt=95)
-            self._turn(direction, abs(deg), now)
-            self._last_turn_direction = direction
-            self._last_move = now
-            self._staying_since = 0.0
-            self._staying_at_anchor = None
-            self._last_revisit = now
-            logger.info("Revisit [sweep]: turn %s %d° [sweep %d]",
-                        direction, abs(deg), self._sweep_idx)
-            return
+        # There is no startup sweep here any more. Startup used to be a 60s
+        # timer inside this controller and a fixed relative sweep; it is now
+        # the explicit visual-environment bootstrap (runtime/environment),
+        # which owns pan/tilt through the Motion Layer until READY. What
+        # remains below is the normal explore path, which runs whenever the
+        # survey does not hold the axes.
 
         # ── Target selection: entity first, then turn-based explore ──
         target = None
@@ -1091,6 +1069,12 @@ class RevisitController:
                 logger.info("Forgetting %s — %d consecutive failures",
                             target.target_id, target.consecutive_fails)
                 self._engine.forget(target.target_id)
+
+    @property
+    def motion(self):
+        """The sole pan/tilt writer. Exposed so the startup survey can claim it
+        (P0008.2) — everything still moves through this one object."""
+        return self._motion
 
     @property
     def busy(self) -> bool:

@@ -52,6 +52,7 @@ from runtime.perception.frame_diff import FrameDiff
 from runtime.perception.face_detection import FaceDetector
 from runtime.perception.object_detection import ObjectDetector
 from runtime.perception.vad import VoiceActivityDetector, AudioCapture
+from runtime.environment.bootstrap import EnvironmentBootstrap
 
 # ── L3-L6 ──
 from runtime.scene.state import SceneState
@@ -158,6 +159,7 @@ class PerceptionRuntime:
 
         # Revisit controller (will be initialised after other modules)
         self.revisit_controller = None
+        self.bootstrap = None
         self.behavior_telemetry = None
 
         # Intention (between L4 and L6)
@@ -239,13 +241,19 @@ class PerceptionRuntime:
         except Exception as e:
             logger.warning("Audio init failed (%s) — voice detection disabled", e)
 
-    def _start_ptz_worker(self):
-        """Start servo PTZ (Arduino SG90)."""
+    def _start_ptz_worker(self) -> bool:
+        """Start servo PTZ (Arduino SG90). Returns whether physical init worked.
+
+        The result is the bootstrap's INITIALIZING input: a camera that cannot
+        be aimed cannot survey anything, and the lifecycle has to know that
+        rather than discover it one timed-out viewpoint at a time.
+        """
         if not self.servo_ptz.start():
             logger.error("Servo PTZ failed to start — continuing without PTZ")
-        else:
-            logger.info("Servo PTZ ready (pan=%d, tilt=%d)",
-                        self.servo_ptz.pan, self.servo_ptz.tilt)
+            return False
+        logger.info("Servo PTZ ready (pan=%d, tilt=%d)",
+                    self.servo_ptz.pan, self.servo_ptz.tilt)
+        return True
 
     # ══════════════════════════════════════════════════
     # Main Loop
@@ -279,8 +287,8 @@ class PerceptionRuntime:
         except AttributeError:
             pass  # Windows doesn't have SIGHUP
 
-        # Init servo PTZ
-        self._start_ptz_worker()
+        # Init servo PTZ (the result gates the startup survey)
+        ptz_ok = self._start_ptz_worker()
         # Init revisit controller + behavioral telemetry
         self.behavior_telemetry = BehavioralTelemetry(
             self.interest_engine, anchor_manager=self.anchor_manager)
@@ -296,6 +304,18 @@ class PerceptionRuntime:
             on_decision=self._on_ptz_decision,
             role_engine=self.role_engine,
         )
+
+        # ── Visual Environment Bootstrap (P0008.2) ──
+        # Startup is this lifecycle, not a timer inside the revisit controller:
+        # INITIALIZING → SURVEYING → READY. While surveying it owns pan/tilt
+        # through the same Motion Layer everything else uses, so normal
+        # tracking/explore cannot fight it for the camera.
+        self.bootstrap = EnvironmentBootstrap(
+            motion=self.revisit_controller.motion,
+            servo_ptz=self.servo_ptz,
+            anchor_manager=self.anchor_manager,
+        )
+        self.bootstrap.start(physical_ok=ptz_ok)
 
         # Anchors are built organically by the RevisitController's explore mode
         # (first 3 minutes). No separate scanner step — one source of exploration.
@@ -578,6 +598,11 @@ class PerceptionRuntime:
                         self._credit_entity("cognition")
 
             # ── Visualization ──
+            # The raw capture is kept for the bootstrap: a visual baseline taken
+            # from the drawn overlay would depend on the preview setting and on
+            # which detections happened to fire, which is exactly the coupling
+            # the bootstrap avoids.
+            raw_frame = frame
             if SHOW_PREVIEW:
                 frame = self._draw_overlay(
                     frame, faces, objects, scored_events, scene_state, intention_result, focus_info, behavior_info
@@ -592,9 +617,16 @@ class PerceptionRuntime:
             if self._frame_count % 10 == 0:
                 self._log_status(scene_state, scored_events, intention_result)
 
+            now = time.time()
+
+            # ── Visual Environment Bootstrap ──
+            # Before the revisit tick, so the survey's goal is set for the same
+            # frame's motion step. The survey only sets goals; the Motion Layer
+            # remains the single writer that emits commands.
+            self.bootstrap.step(now, frame=raw_frame, frame_ts=timestamp)
+
             # ── Curiosity Revisit (non-blocking, uses cached detections) ──
             if self.revisit_controller:
-                now = time.time()
                 self.revisit_controller.tick(now, faces=faces, objects=objects,
                                              frame=frame,
                                              frame_age=max(0.0, now - timestamp))

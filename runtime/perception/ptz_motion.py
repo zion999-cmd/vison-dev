@@ -58,14 +58,53 @@ class PtzMotion:
         # Latest requested setpoint per axis; None means "nothing pending".
         self._goal_pan: Optional[int] = None
         self._goal_tilt: Optional[int] = None
+        # A startup survey holds both axes until it completes — not on a timer.
+        self._survey_active = False
         # Diagnostics for the hardware smoke test.
         self.blocked_explore = 0
+        self.blocked_track = 0
 
     # ── Ownership ──
 
     def tracking_active(self, now: float) -> bool:
         """True while tracking owns pan and tilt."""
         return now < self._track_until
+
+    # ── Startup survey ownership ──
+
+    @property
+    def surveying(self) -> bool:
+        """True while a startup survey owns pan and tilt."""
+        return self._survey_active
+
+    def survey(self, now: float, pan: Optional[int] = None,
+               tilt: Optional[int] = None) -> None:
+        """A startup survey claims both axes and sets a viewpoint setpoint.
+
+        Unlike tracking's claim this one does not expire on a timer: the survey
+        is a bounded protocol with its own completion, and a claim that lapsed
+        between two viewpoints would let normal behavior take the camera.
+        Movement still goes through step(), so a survey move is rate-limited
+        and coalesced exactly like any other.
+        """
+        self._survey_active = True
+        if pan is not None:
+            self._goal_pan = int(pan)
+        if tilt is not None:
+            self._goal_tilt = int(tilt)
+
+    def end_survey(self) -> None:
+        """Hand movement ownership back to normal runtime behavior.
+
+        Also drops any setpoint the survey left behind. A viewpoint that never
+        arrived (a stuck or unresponsive PTZ) leaves its goal pending, and
+        `step()` would otherwise keep driving the camera toward a pose the
+        survey already gave up on — after READY, when behavior thinks it owns
+        the axes again.
+        """
+        self._survey_active = False
+        self._goal_pan = None
+        self._goal_tilt = None
 
     # ── Requests ──
 
@@ -76,7 +115,15 @@ class PtzMotion:
         Claiming both axes is deliberate: a target that needs no pan
         correction this instant still needs the pan left alone, or
         exploration turns the camera away mid-follow.
+
+        Dropped while a startup survey holds the axes — the survey owns
+        movement until it completes, and two writers aiming the camera at once
+        is the thing this layer exists to prevent.
         """
+        if self._survey_active:
+            self.blocked_track += 1
+            logger.debug("PtzMotion: track dropped, startup survey owns the axes")
+            return
         self._track_until = now + self._track_hold
         if pan is not None:
             self._goal_pan = int(pan)
@@ -89,10 +136,10 @@ class PtzMotion:
 
         Returns True when the request was accepted.
         """
-        if self.tracking_active(now):
+        if self._survey_active or self.tracking_active(now):
             self.blocked_explore += 1
-            logger.debug("PtzMotion: explore dropped while tracking (pan=%s tilt=%s)",
-                         pan, tilt)
+            logger.debug("PtzMotion: explore dropped (survey=%s tracking=%s pan=%s tilt=%s)",
+                         self._survey_active, self.tracking_active(now), pan, tilt)
             return False
         if pan is not None:
             self._goal_pan = int(pan)

@@ -191,3 +191,65 @@ class TestNoveltyLifecycle:
         assert anchor.novelty < peak, "a settled empty anchor must decay"
         assert anchor.observed_once is True
         assert anchor.barren is True, "empty-anchor detection must be reachable"
+
+
+class TestVisualEvidence:
+    """The bootstrap records what a viewpoint looked like.
+
+    It deliberately does not go through `observe()`: that path establishes and
+    updates `baseline_objects` from YOLO classes and drives novelty/interest,
+    and a bootstrap observation must be valid with zero recognition — passing
+    an empty object list through it would mean "observed zero objects" and
+    erase the baseline (BI-05/BI-10 semantics). Visual evidence therefore has
+    its own write path that touches only the visual fields.
+    """
+
+    def test_recording_creates_the_anchor_at_that_pose(self):
+        m = AnchorManager(pan_spacing=20, tilt_spacing=15)
+        m.record_visual(pan=90, tilt=95, signature=[0.1, 0.2], now=1000.0)
+
+        a = m.lookup(90, 95)
+        assert a is not None
+        assert a.visual_signature == [0.1, 0.2]
+        assert a.visual_signature_at == 1000.0
+
+    def test_two_poses_in_one_cell_are_one_place(self):
+        """Identity is the canonical grid cell, not the exact pose — so a
+        re-survey of the same direction overwrites one baseline."""
+        m = AnchorManager(pan_spacing=30, tilt_spacing=15)
+        m.record_visual(pan=90, tilt=95, signature=[1.0], now=1000.0)
+        m.record_visual(pan=93, tilt=97, signature=[2.0], now=1005.0)
+
+        assert m.anchor_count == 1, "the grid is the identity, not the exact pose"
+        assert m.lookup(93, 97).visual_signature == [2.0]
+        assert m.lookup(93, 97).visual_signature_at == 1005.0
+
+    def test_it_does_not_touch_the_p0008_1_bookkeeping(self):
+        m = AnchorManager(pan_spacing=20, tilt_spacing=15)
+        m.observe(objects=[{"class_name": "chair", "confidence": 0.9}], pan=90, tilt=95)
+        a = m.lookup(90, 95)
+        before = (set(a.baseline_objects), a.novelty, a.interest, a.observed_once,
+                  a.last_seen, a.visit_count)
+
+        m.record_visual(pan=90, tilt=95, signature=[0.5], now=9999.0)
+
+        after = (set(a.baseline_objects), a.novelty, a.interest, a.observed_once,
+                 a.last_seen, a.visit_count)
+        assert after == before, \
+            "recording a view must not disturb baseline/novelty/interest/last_seen"
+
+    def test_a_never_observed_cell_is_not_claimed_as_object_observed(self):
+        m = AnchorManager(pan_spacing=20, tilt_spacing=15)
+        m.record_visual(pan=90, tilt=95, signature=[0.5], now=1000.0)
+
+        a = m.lookup(90, 95)
+        assert a.visual_signature == [0.5]
+        assert not a.observed_once, \
+            "a visual record does not establish an object baseline"
+
+    def test_the_evidence_survives_and_is_readable_later(self):
+        m = AnchorManager(pan_spacing=20, tilt_spacing=15)
+        m.record_visual(pan=10, tilt=95, signature=[0.3, 0.4], now=1000.0)
+
+        # later, from anywhere: the baseline is still there
+        assert m.lookup(10, 95).visual_signature == [0.3, 0.4]

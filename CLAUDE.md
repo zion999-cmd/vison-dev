@@ -119,12 +119,46 @@ and ends only on lost / stale / timeout.
 - Presence signal (`_last_track_hit < 15s`) extends stay duration, and is what
   keeps an open session (and its commitment) alive
 
+### Visual Environment Bootstrap (P0008.2, `runtime/environment/`)
+
+Startup is an explicit lifecycle, not a timer:
+
+    INITIALIZING → SURVEYING → READY
+
+`EnvironmentBootstrap` surveys a deterministic set of viewpoints derived from
+the PTZ's real travel limits and the camera's field of view
+(`bootstrap_viewpoints` — centres at most `fov × (1 − overlap)` apart, so the
+count follows the lens), each following **move → settle → observe → record**.
+
+- A viewpoint is covered by an *observation*, never by a command, and never by
+  recognition: a valid image counts even when YOLO, YuNet and the VLM have
+  nothing to say about it.
+- Each covered viewpoint records a `ViewSignature` (a coarse mean-HSV grid)
+  into the anchor at that pose via `AnchorManager.record_visual`, so the
+  baseline outlives startup and keeps accumulating from normal observation.
+  Recording deliberately bypasses `AnchorManager.observe()` — that path derives
+  `baseline_objects` from YOLO classes and drives novelty/interest, so a
+  recognition-free observation would be stored as "observed zero objects" and
+  erase the baseline.
+- READY means "enough initial visual reference to begin normal operation" — not
+  that the room is understood, that novelty is zero, or that every possible view
+  was visited. Coverage is spatial only; there is deliberately no
+  `environment_score`.
+- The survey owns pan/tilt through the Motion Layer (`survey()` /
+  `end_survey()`), so tracking and explore cannot fight it for the camera.
+  Ownership returns at READY.
+- Bounded: `MAX_ATTEMPTS` per viewpoint with a timeout each. A stuck PTZ costs
+  startup a few seconds and a loud warning, never a deadlock.
+
 ### Revisit Controller States
 
-1. **Sweep** (first 60s): alternating left/right `[30, -45, 45, -45, 60, -60, 45, -30]` at 8s intervals, tilt=95
-2. **Stay** at interesting anchor: hot=300s, moderate=120s, idle=30s max
-3. **Explore** turn: random left/right, return to best anchor if interest>0.25
-4. **Track target**: proportional pan/tilt adjustments at 1.5s intervals
+Startup is **not** one of these states any more: it is the bootstrap above,
+which holds pan/tilt until READY.
+
+1. **Stay** at an interesting anchor: hot=300s, moderate=120s, idle=30s max
+2. **Explore** turn: random left/right (degrees cycling through
+   `_SWEEP_SEQUENCE`), return to best anchor if interest>0.25
+3. **Track target**: proportional pan/tilt adjustments at the framing cadence
 
 ### Two independent LLM paths (both optional, different config keys)
 
@@ -202,6 +236,7 @@ runtime/
   presence/            — identity continuity + novelty + expression change
   behavior/            — IDLE→OBSERVE→TRACKING→ENGAGED→ACCOMPANYING
   memory/              — L5: episodic memory (rolling buffer)
+  environment/         — P0008.2 startup visual-environment bootstrap (lifecycle, viewpoints, visual baseline)
   cognition/           — L6: VLM/LLM trigger with multi-backend polling
   interest/            — layered attention: interest, curiosity, entity, anchor, revisit, verifier
   familiarity/         — session-level habituation formula

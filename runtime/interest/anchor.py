@@ -52,6 +52,13 @@ class SpatialAnchor:
     # and the anchor could never be marked barren.
     observed_once: bool = False
 
+    # Visual baseline of this place as it looked when last recorded (P0008.2).
+    # Deliberately separate from the object baseline above: "I saw this view"
+    # must not require YOLO to have recognised anything, so the bootstrap
+    # writes these fields and nothing else.
+    visual_signature: Optional[List[float]] = None
+    visual_signature_at: float = 0.0
+
     # Interest — driven by CHANGES from baseline
     interest: float = 0.3       # base interest in any observed location
     uncertainty: float = 0.0    # grows with time since last visit
@@ -149,6 +156,33 @@ class AnchorManager:
         self._tilt_spacing = tilt_spacing
 
     # ── Public API ──
+
+    def record_visual(self, pan: float, tilt: float, signature: List[float],
+                      now: float) -> SpatialAnchor:
+        """Record what this place looked like, and nothing else.
+
+        Deliberately not routed through observe(): that path derives
+        baseline_objects from YOLO classes and drives novelty/interest, so a
+        bootstrap observation — which has to be valid even when nothing is
+        recognised — would be recorded as "observed zero objects" and erase the
+        baseline (BI-05/BI-10). Only the visual fields move here; last_seen,
+        observed_once, novelty and interest stay exactly as P0008.1 left them.
+
+        Identity is the canonical grid cell (BI-11), so two nearby poses record
+        into the same place rather than creating a second one.
+        """
+        with self._lock:
+            anchor = self._get_or_create_anchor_locked(pan, tilt)
+            anchor.visual_signature = list(signature)
+            anchor.visual_signature_at = float(now)
+            return anchor
+
+    def visual_baselines(self) -> List[SpatialAnchor]:
+        """Every anchor that has a recorded view, newest observation last."""
+        with self._lock:
+            return sorted((a for a in self._anchors.values()
+                           if a.visual_signature is not None),
+                          key=lambda a: a.visual_signature_at)
 
     def observe(
         self,

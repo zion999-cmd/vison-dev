@@ -124,69 +124,147 @@ def test_revisit_writes_movement_only_through_the_motion_layer():
             f"revisit.py must not call _servo_ptz.{call} directly"
 
 
-def _controller(servo):
-    ctrl = RevisitController(interest_engine=MagicMock(), servo_ptz=servo,
+def _idle_controller(servo):
+    """A controller with nothing to stay at and nothing to chase, so tick()
+    reaches the explore path — which is where the tilt-levelling guard lives
+    now that the startup sweep is gone."""
+    engine = MagicMock()
+    engine.next_revisit.return_value = None      # no legacy curiosity target
+    ctrl = RevisitController(interest_engine=engine, servo_ptz=servo,
                              camera_state=MagicMock())
-    ctrl._started_at = 1000.0 - 10.0   # inside the 60s startup sweep window
-    ctrl._last_move = 0.0              # sweep is due
+    ctrl._last_move = 0.0              # an explore turn is due
     ctrl._last_revisit = 0.0           # revisit gate open
     return ctrl
 
 
-def test_sweep_does_not_level_the_tilt_across_a_detection_gap():
+def test_explore_does_not_level_the_tilt_while_a_target_was_tracked_recently():
     """A follow has multi-second detector gaps. Levelling the tilt because one
     frame missed the target is what reset it every cycle on hardware."""
     servo = MagicMock(); servo.moving = False; servo.pan = 90; servo.tilt = 110
-    ctrl = _controller(servo)
+    ctrl = _idle_controller(servo)
     ctrl._last_track_hit = 1000.0 - 5.0    # tracked 5s ago: past the layer's
                                            # hold, still inside presence
     targets = []
     servo.tilt_to.side_effect = lambda a: targets.append(a)
 
     ctrl.tick(1000.0, faces=[], objects=[])
+    ctrl.tick(1000.2, faces=[], objects=[])
 
     assert 95 not in targets, \
         "the tilt must not be levelled while a target was tracked recently"
 
 
-def test_sweep_levels_the_tilt_once_presence_lapses():
+def test_explore_levels_the_tilt_once_presence_lapses():
     servo = MagicMock(); servo.moving = False; servo.pan = 90; servo.tilt = 110
-    ctrl = _controller(servo)
+    ctrl = _idle_controller(servo)
     ctrl._last_track_hit = 1000.0 - 20.0   # nothing tracked for 20s
     targets = []
     servo.tilt_to.side_effect = lambda a: targets.append(a)
 
-    # The sweep sets its goal after step() has already run this frame, so the
-    # command goes out on the next one. Irrelevant at the 8s sweep cadence.
     ctrl.tick(1000.0, faces=[], objects=[])
     ctrl.tick(1000.2, faces=[], objects=[])
 
     assert 95 in targets, "an empty room must still scan at level"
 
 
-def test_the_startup_sweep_is_the_only_writer_while_detections_come_in():
-    """Hardware 2026-09-24: every face during the startup sweep was handed
-    straight to _track_target(), which then fought the sweep over the tilt —
-    the sweep pulled it back to 95° every 8s and the follow re-corrected
-    through the ±8° clamp for 3-4 commands. A detection is not a reason to
-    follow, so until the revisit/commitment flow opens a session the sweep is
-    the only writer."""
-    servo = MagicMock()
+def test_the_revisit_controller_has_no_startup_clock():
+    """Startup is the visual-environment bootstrap's lifecycle now, not a
+    timer in here: the decision phase cannot depend on how long the controller
+    has been running."""
+    def phase_at(elapsed):
+        servo = MagicMock(); servo.moving = False; servo.pan = 90; servo.tilt = 100
+        ctrl = _idle_controller(servo)
+        ctrl.tick(1000.0 + elapsed, faces=[], objects=[])
+        return (ctrl._last_revisit != 0.0, servo.pan_to.call_count)
+
+    assert phase_at(10.0) == phase_at(200.0), \
+        "the decision path must not have a 60-second startup phase"
+
+    src = pathlib.Path("runtime/interest/revisit.py").read_text(encoding="utf-8")
+    assert "startup_phase" not in src and "_started_at" not in src, \
+        "no implicit startup window may remain in the revisit controller"
+    assert "Revisit [sweep]" not in src, "the timed startup sweep is gone"
+
+
+# ── Startup survey ownership ──
+
+def test_the_survey_owns_both_axes_while_it_runs():
+    """Startup survey must not race normal behavior for movement ownership."""
+    motion, servo = build()
+    motion.survey(1000.0, pan=40, tilt=95)
+
+    motion.track(1000.1, pan=150)          # normal behavior asks for the pan
+    motion.step(1000.1)
+
+    # 90 → 40 is a 50° survey move, so the first emitted command is one bounded
+    # step (90-20); the point is that it heads for the *survey* viewpoint and
+    # never for the 150 the behavior asked for.
+    assert servo.pan_to.call_args[0][0] == 70, \
+        f"the survey's viewpoint must drive the motion, not the tracking request (got {servo.pan_to.call_args[0][0]})"
+    assert motion.blocked_track >= 1, "and the drop must be visible in telemetry"
+    assert not motion.tracking_active(1000.2), "a survey is not a tracking session"
+
+
+def test_explore_is_dropped_while_the_survey_runs():
+    motion, _ = build()
+    motion.survey(1000.0, pan=40)
+
+    assert motion.explore(1000.1, tilt=95) is False
+    assert motion.explore_pan_by(30, 1000.1) is False
+    assert motion.blocked_explore > 0
+
+
+def test_the_survey_walks_a_long_move_in_bounded_steps():
+    """The survey is a movement writer like any other: same slew limit."""
+    motion, servo = build(max_step=20)
+    motion.survey(1000.0, pan=120)
+    servo.pan = 10
+
+    seen = []
     servo.moving = False
-    servo.pan = 90
-    servo.tilt = 100
-    ctrl = _controller(servo)         # inside the startup window, sweep due
-
-    tilt_targets = []
-    servo.tilt_to.side_effect = lambda a: tilt_targets.append(a)
-
-    for i in range(5):
+    for _ in range(12):
         servo.moving = False
-        ctrl._last_move = 0.0         # the sweep is due on every frame
-        ctrl.tick(1000.0 + i * 0.2, faces=FACE_LOW, objects=[])
+        if not motion.step(1000.0):
+            break
+        seen.append(servo.pan_to.call_args[0][0])
+        servo.pan = seen[-1]
 
-    assert 95 in tilt_targets, "the sweep must still level the tilt for an empty room"
-    assert set(tilt_targets) == {95}, \
-        "a detection must not start a follow that fights the sweep for the tilt"
-    assert not ctrl._commitment_engine.has_commitment, \
-        "a detection during the sweep must not open a tracking session"
+    assert seen and all(abs(b - a) <= 20 for a, b in zip([10] + seen, seen)), \
+        f"a survey must not be a bang-bang move: {seen}"
+    assert seen[-1] == 120
+
+
+def test_wear_protect_still_preempts_a_survey():
+    motion, servo = build()
+    motion.survey(1000.0, tilt=160)
+
+    motion.wear_protect(120)
+    motion.step(1000.0)
+
+    assert servo.tilt_to.call_args[0][0] == 120, \
+        "hardware protection outranks the survey"
+
+
+def test_behavior_owns_movement_again_after_the_survey_ends():
+    motion, servo = build()
+    motion.survey(1000.0, pan=40)
+    motion.end_survey()
+
+    assert motion.explore(1000.1, pan=60) is True
+    motion.step(1000.1)
+    assert servo.pan_to.call_args[0][0] == 70, "90 → 60, one bounded step"
+
+
+def test_ending_the_survey_clears_any_pending_goal():
+    """A viewpoint the camera never reached leaves its setpoint pending. Handing
+    ownership back must not leave behavior driving toward a pose the survey
+    already gave up on."""
+    motion, servo = build(max_step=20)
+    motion.survey(1000.0, pan=150)      # 90 → 150, so it takes several steps
+    motion.step(1000.0)
+    assert motion.pending(), "a long survey move is still in progress"
+
+    motion.end_survey()
+
+    assert not motion.pending(), "the survey's stale goal must not outlive the survey"
+    assert motion.step(1001.0) is False, "and nothing may still be emitted"

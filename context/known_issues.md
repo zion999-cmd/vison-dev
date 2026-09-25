@@ -18,7 +18,7 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **347 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
+| Code regression | **379 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
 | Hardware baseline | **PARTIAL**：2026-09-24 07:15 那次 Test A 通过 / Test B **未覆盖** / Test C 暴露 BI-10、BI-11（两条已修，待复验）；**PTZ 部分 PASSED** —— 2026-09-24 14:03 实机 A/B 对照，见 BI-14 |
 | 实机运行 | 5 次：07:15:32（13m14s，3873 帧）、14:03:34 / 14:11:47（各 ~7m，A/B 对照）、15:52:58（7m26s，走动 A/B，**判定 INVALID**）、17:28:25（5m43s，BI-15 验证） |
 | 分支 | `fix/frame-diff-and-dead-code` @ `a4f20ff`（**无 upstream**；未 merge 到 master） |
@@ -235,10 +235,11 @@
 - **影响**：P0008.1 的 Scenario B/C（离开 RELEASE、回来 reacquire）在硬件上仍属未验证；不要把"未观察到问题"当成"已验证"。
 - **状态**：未验证（冻结期内不处理）。
 
-### Startup Lifecycle：当前是隐式的，没有独立初始化阶段
-- **审计结论（已完成）**：现在的"启动"不是 runtime lifecycle，而是 `RevisitController` 内部的三件事叠加 —— 60s `startup_phase` 闸门、8s 节奏的定时 sweep（`_SWEEP_SEQUENCE`）、以及 stay 条件（非 startup 窗口 + anchor 在 pan±15° 内 + 非 barren/suppressed + `interest>0.08` + `baseline_objects` 非空）。
-- **影响**：没有"建立视觉环境基线"这一步 —— 房间无人时没有系统性勘察，anchor 是靠 explore 逐渐撞出来的。用户已明确下一阶段方向为**启动期视觉环境建立 / initialization**。
-- **状态**：未实现（冻结期内明确不实现）。
+### Startup Lifecycle：隐式 60s 定时 → **已由 P0008.2 显式生命周期取代**
+- **审计结论（2026-09-25 完成）**：原先的"启动"不是 runtime lifecycle，而是 `RevisitController` 内部的三件事叠加 —— 60s `startup_phase` 闸门、8s 节奏的定时 sweep（`_SWEEP_SEQUENCE`）、以及 stay 条件。没有 READY 状态、没有覆盖率结果、没有任何"这个方向我确实看过"的证据；"启动完成"只意味着"计时器走完了"。
+- **已实现（P0008.2，`runtime/environment/`）**：显式 `INITIALIZING → SURVEYING → READY` 生命周期；确定性视点布局（由 PTZ 实际行程 + FOV + 重叠要求推导）；`move → settle → observe → record` 协议；视点由**观测**（而非命令、也无需识别）覆盖；每个已覆盖视点把一份 `ViewSignature` 写入该位姿的 anchor（`AnchorManager.record_visual`，**刻意绕过** `observe()`，因为那条路径会把"无识别的有效观测"记成"观测到零物体"并抹掉 baseline）；SURVEYING 期间经 Motion Layer 独占 pan/tilt，READY 交还；每视点 `MAX_ATTEMPTS` + 超时，卡住的 PTZ 不会死锁。原 `startup_phase` / 定时 sweep / `_started_at` 已从 `revisit.py` 移除；explore 路径仍保留 `_SWEEP_SEQUENCE`（那是 READY 之后的正常行为，不属于启动）。
+- **仍然未做（明确 deferred，不在 P0008.2 范围）**：Active Survey / 由 novelty 驱动的主动细化（等 bootstrap 契约在硬件上验证之后再说）；竖直方向只覆盖水平一行；`ViewSignature` 的"materially different"阈值尚未标定（`material_difference()` 只是参考值，P0008.2 不用它做任何门控）；bootstrp 的覆盖率是**空间**覆盖，不是环境理解。
+- **状态**：**IMPLEMENTED（代码 + 测试；等待实机验证）**
 
 ### tracking session 只能由"停在合格 anchor 上"这一条路径开启
 - **证据**：`_track_target` 的 5 个调用点中，4 个在 `_commitment_holds()` 之后，而 `_commitment_holds` 要求 `has_commitment` 已为真 —— 它们只能**刷新**已有 session，不能建立。唯一能建立的是 stay-at-anchor 分支，前置条件为：非 startup 窗口、anchor 在 pan±15° 内、非 barren、非 suppressed、`interest > 0.08`、`baseline_objects` 非空。
