@@ -132,3 +132,55 @@ def test_revisit_interval_is_unchanged():
     ctrl, _ = build()
     assert ctrl.revisit_interval == 8.0
     assert ctrl._track_interval == 1.5
+
+
+# ── The decision body must not run at frame rate under a live commitment ──
+
+def test_an_active_commitment_does_not_arbitrate_at_frame_rate():
+    """A live commitment must not turn the decision body into a per-frame loop.
+
+    Hardware 2026-09-25: 21 Revisit [pick] events and 21 Commitment HOLD blocks
+    inside 10 seconds. The active-commitment path returned through
+    `_track_target(now)` without advancing `_last_revisit`, so the Revisit gate
+    never re-armed and the whole decision body — Commitment arbitration and its
+    HOLD telemetry included — ran once per frame. Every decision count in the
+    telemetry was therefore a frame count, not a decision count.
+    """
+    ctrl, servo = build()
+    open_session(ctrl, servo, 1000.0)        # the stay path establishes the session
+    ctrl._anchor_manager = None              # nothing to stay at → the commitment path
+    ctrl._last_revisit = 0.0
+    before = ctrl.commitment_telemetry.hold_count
+
+    for i in range(40):                      # 40 frames × 0.2s = 8s: inside the gate
+        tick(ctrl, servo, 1000.2 + i * 0.2, face_at(0.0))
+
+    held = ctrl.commitment_telemetry.hold_count - before
+    assert held == 1, \
+        f"the decision body ran {held} times in 8s — it must run once per revisit gate"
+
+    tick(ctrl, servo, 1008.4, face_at(0.0))  # past the gate
+    assert ctrl.commitment_telemetry.hold_count - before == 2, \
+        "and it must run again once the cadence lapses"
+
+
+def test_following_still_updates_faster_than_the_decision_cadence():
+    """The other two timescales stay independent: arming the decision gate must
+    not throttle an active follow (23b7f5b)."""
+    ctrl, servo = build()
+    open_session(ctrl, servo, 1000.0)
+    ctrl._anchor_manager = None
+    ctrl._last_revisit = 0.0
+
+    tick(ctrl, servo, 1000.2, face_at(-0.30))    # crosses start_offset → follow engages
+    assert ctrl._following(), "crossing the start offset must engage a follow"
+    assert servo.pan_to.call_count == 1
+    held = ctrl.commitment_telemetry.hold_count
+
+    for i in range(3):                           # 0.4s apart: inside the 8s decision window
+        tick(ctrl, servo, 1000.6 + i * 0.4, face_at(-0.40))
+
+    assert servo.pan_to.call_count == 4, \
+        "the follow must refresh its motion goal on every observation, decision cadence or not"
+    assert ctrl.commitment_telemetry.hold_count == held, \
+        "and none of those motion updates may re-run the decision body"

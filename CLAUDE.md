@@ -83,19 +83,26 @@ CANDIDATE (5 sightings to promote) → ACTIVE → LOST (30 misses) → FORGOTTEN
 Three cadences are deliberately separate. A **tracking session** is opened only
 by the revisit/commitment flow — never by a detection: `_track_target()` (the
 sole caller of `CommitmentEngine.begin()`) establishes one from the
-stay-at-anchor path. The **decision** cadence (`_track_interval`, 1.5s, measured
-from the last emitted correction) decides whether a follow may start. The
-**execution** cadence is the observation rate: an engaged follow refreshes its
-motion goal on every valid observation, rate-limited by the motion layer. Capping
-the execution at 1.5s was what limited the chase to 10°/s pan and 5.33°/s tilt —
-a person walking at conversational distance exceeds that, and no trailing error
-can close the gap above it. Seeing a face or a person is not by itself a reason
-to follow it. An
+stay-at-anchor path. The **decision** cadence is `revisit_interval` (8s): every
+return path of the decision body re-arms it — the active-commitment ones
+included — so Commitment arbitration and its HOLD telemetry run once per gate,
+not once per frame. Within that, `_track_interval` (1.5s, measured from the last
+emitted correction) decides whether a follow may start. The **execution** cadence
+is the observation rate: an engaged follow refreshes its motion goal on every
+valid observation, rate-limited by the motion layer — where "valid" means the
+frame was captured after the camera's own last move finished, or the loop would
+answer a view of the world it has already changed. Capping the execution at 1.5s
+was what limited the chase to 10°/s pan and 5.33°/s tilt — a person walking at
+conversational distance exceeds that, and no trailing error can close the gap
+above it. Seeing a face or a person is not by itself a reason to follow it. An
 anchor-level judgement (flat interest / sparse classes / VLM "trivial") ends the
 stay but never clears the commitment: that belongs to the person being watched
 and ends only on lost / stale / timeout.
 
-- Face bbox preferred over YOLO person bbox
+- The face bbox is the more precise reference, but only while its centre lies
+  inside the person bbox; a face outside the body is a different target (or a
+  false positive) and taking it swings the camera across the frame. With no
+  person box, the best face is all there is
 - **Framed, not centred**, through three independent knobs: `start_offset`
   (nothing moves below it), `aim_offset` (where a triggered follow takes the
   target — the residual it leaves) and `gain` (how much of the remaining excess

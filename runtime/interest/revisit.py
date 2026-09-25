@@ -319,6 +319,12 @@ class RevisitController:
                             # novelty-based stay timeout (the Commitment Gap).
                             if self._commitment_holds(now):
                                 self._staying_since = now
+                                # Re-arm the decision cadence before returning.
+                                # Skipping this left the Revisit gate open, so
+                                # the whole decision body — Commitment
+                                # arbitration included — ran once per frame
+                                # instead of once per revisit_interval.
+                                self._last_revisit = now
                                 self._track_target(now)
                                 return
                             if max_stay <= 30.0:
@@ -486,6 +492,8 @@ class RevisitController:
         if target is None:
             # P0008.1: no curiosity target — hold if a person is still present.
             if self._commitment_holds(now):
+                # Re-arm the decision cadence (see the stay path above).
+                self._last_revisit = now
                 self._track_target(now)
                 return
             if now - self._last_move > 20.0:
@@ -543,6 +551,8 @@ class RevisitController:
         # ── P0008.1: don't switch to a challenger unless it clearly beats our hold ──
         challenger = entity_score if target_source == "entity" else legacy_score
         if self._commitment_holds(now, challenger_curiosity=challenger):
+            # Re-arm the decision cadence (see the stay path above).
+            self._last_revisit = now
             self._track_target(now)
             return
 

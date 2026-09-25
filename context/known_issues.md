@@ -18,7 +18,7 @@
 
 | 项 | 值 |
 |----|-----|
-| Code regression | **340 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
+| Code regression | **347 passed**, 0 failed（`conda run -n vision-dev python -m pytest -q`） |
 | Hardware baseline | **PARTIAL**：2026-09-24 07:15 那次 Test A 通过 / Test B **未覆盖** / Test C 暴露 BI-10、BI-11（两条已修，待复验）；**PTZ 部分 PASSED** —— 2026-09-24 14:03 实机 A/B 对照，见 BI-14 |
 | 实机运行 | 5 次：07:15:32（13m14s，3873 帧）、14:03:34 / 14:11:47（各 ~7m，A/B 对照）、15:52:58（7m26s，走动 A/B，**判定 INVALID**）、17:28:25（5m43s，BI-15 验证） |
 | 分支 | `fix/frame-diff-and-dead-code`（未 merge、未 push） |
@@ -138,6 +138,30 @@
 - **证据（实机，`runtime_20260924_172825.log`，343s）**：`Flat interest` 触发**两次**（t=213 `anchor_120_90`、t=333 `anchor_80_90`）；结果 `Commitment Start` **仅 1 次**（t=80）、`RELEASE`/`SWITCH` **0 次**、`Revisit [turn]`（explore 转向）**0 次**。第一次 flat-interest 之后 35s 内仍发生 **35 条 framing 命令**（pan 达 ±15°、tilt 达 ±8°），即"锚点被判无聊 → 相机继续跟随人"。锚点自身的 leave 也正常：`anchor_120_90`（hot 0.775）被放弃，相机转到 `anchor_80_90` 停留。
 - **状态**：**FIXED（代码 + 实机验证）**
 
+### BI-19 — 用"自己动作之前的画面"做修正（自反馈失控）
+- **HARDWARE OBSERVED**（`runtime_20260924_0825`…见下，`runtime_20260925_081425.log`）：pan 在连续 8 条 -15° 命令里转过 128°（165→37），而**测量到的 dx 同时从 0.16 涨到 0.48** —— 转 128° 必须让 dx 下降 2.3，所以被读到的那个数不可能来自动作之后的画面。循环在拿自己的误差当输入，一路跑到机械限位并滞留（另一份日志里同一签名：pan 101→10，dx 钉在 0.22–0.35）。
+- **根因**：`_acquire_track_target` 不知道自己的 frame 是什么时候采的。`camera.read()` 一直返回采集时间戳，但 main loop 丢掉了它。
+- **修复**：`tick(..., frame_age=...)` 由 main.py 传入；**已建立的 follow** 只在"这一帧的采集时刻晚于上一次动作完成时刻"（`now - frame_age >= _last_track + _last_track_move`）才刷新 goal。`_last_track_move` 由实测 8ms/° 推导（两轴并行取较大者）。未建立的 follow 仍走原来的 1.5s decision 节奏。同时修掉第二个缺陷：**face 框只在中心落在 person 框内时才采用**（实测两者相差 0.72 画幅、符号相反、同秒交替 4 次，这正是把 pan 在两端之间对砸的原因）；无 person 框时仍单用人脸。
+- **证据（测试）**：`tests/test_ptz_gentle_framing.py` 新增 5 例（陈旧帧不得驱动修正 / 等待不等于放弃 follow / person 框外的 face 不作数 / person 框内的 face 仍优先 / 无 person 框时人脸仍可用）。
+- **证据（实机 `runtime_20260925_081425.log`，425s）**：依据陈旧帧的修正 **0 条**；face/person 分歧 >0.25 画幅降到 **2.5%**；目标符号逐帧翻转 1%；A-B-A 反转 **0**；**不再冲到对面限位**。
+- **未定性（只记录，未修）**：该次运行里"取到的目标"有 **96% 的帧落在 comfort zone 内**（`|dx|>0.15` 仅 3.9%），因此 425s 里 pan 真正有理由动的时间只有约 **10s**（相机物理运动时间 1.6%）。目标为何一直居中——是相机确实对着人，还是 `_acquire_track_target` 取到了画面中心的假阳性——**当次日志没记框的宽高，判不出来**（同一帧确曾报出两个框：`face n=2 cx=[416, 164]`，一个在动、一个固定）。
+- **提交**：`cf7c36a`
+
+### BI-20 — active commitment 让 decision body 以帧率运行
+- **HARDWARE OBSERVED**（审计，`runtime_20260925_072511.log`）：10 秒内 **21 条 `Revisit [pick]` + 21 个 `Commitment HOLD` 块**。即 Commitment 仲裁与 HOLD telemetry 每帧执行一次，**telemetry 里的 decision 计数实际是帧计数**。
+- **根因**：decision body 里三条"commitment 成立即返回"的路径（stay 超时保持、无好奇心目标、challenger 未胜出）走的是 `_track_target(now); return`，**没有推进 `_last_revisit`**。其余每一条返回路径都推进了，所以这三条让 8s 闸门永不重新武装。属既存缺陷（P0008.1 引入），BI-15/BI-17 之后该路径变成常态入口后更明显。
+- **修复**：三条路径各补一行 `self._last_revisit = now`。语义、阈值、HOLD/SWITCH/RELEASE 全部未改；**未动** `_framing_update` 的执行路径，因此 23b7f5b 的高频执行节奏不受影响。
+- **证据（测试）**：`tests/test_revisit_tracking_cadence.py` 两例同时钉住两个性质 —— (A) 8s 窗口内仲裁只跑 1 次、窗口过后再跑 1 次（修复前为每帧 1 次）；(B) FOLLOWING 状态下 0.4s 间隔的观测仍能连续刷新 motion goal，且期间仲裁计数不变。修复前两例均失败。
+- **验证（分层报告，生产 5 FPS = 300 帧/分；驱动真实 `tick()` 测得）**：
+
+  | 场景 | decisions/分 | framing updates/分 | motion-goal sets/分 | PTZ 命令/分 |
+  |---|---|---|---|---|
+  | 人静止居中（未跟随） | **8** | 300 | 0 | 0 |
+  | 人持续横向走动（跟随中） | **8** | 300 | **300** | 300 |
+
+  即 decision 层回到 7.5s 闸门节奏，execution 层仍按观测率刷新 —— 两个时间尺度独立，无架构冲突。
+- **状态**：**FIXED（代码 + 回归测试 + 分层实测）**
+
 ### BI-18 — `_turn()` 签名漂移：丢失追踪后进程崩溃
 - **HARDWARE OBSERVED**（`runtime_20260925_072511.log`，frames=3104，用户实机）：
   `Commitment RELEASE` → `Revisit [leave]: anchor_20_105 tier=idle int=0.130 ... → boring, move on`
@@ -194,17 +218,6 @@
 - **影响**：站在相机前但当前不在"值得停留的锚点"上的人**完全不会被跟随**（旧代码的 fast path 跟随任何一张脸）。这是本轮"检测不得启动跟踪"的直接后果，但实际闸门是 anchor-stay 启发式，比"由 revisit/commitment 流程决定"更严。
 - **实机观察**：14:03 那次运行在 `Revisit [stay]: anchor_80_90` 出现后 1 秒内建立 session 并全程保持 —— 桌面场景下可达，但需要用户先建立 anchor。
 - **归属**：本轮 diff 引入的**有意**收窄，需产品决策而非 bug 修复。
-
-### `target is None` + `_commitment_holds` 分支不更新 `_last_revisit`
-- **证据**（代码 + 实机）：`if self._commitment_holds(now): self._track_target(now); return` 没有 `self._last_revisit = now`。承诺存在时该分支每帧进入 → 8s 闸门实质失效 → `Revisit [pick]` 与 `Commitment.Telemetry` 各约 **5 行/秒**（14:03 运行 351 行 / 150s）。
-- **影响**：日志噪音（使长测的轮转窗口更紧张，见"日志轮转"条）；行为等价（`_track_target` 自身有 1.5s 节流）。
-- **补充（BI-15 之后更常见）**：该路径现在是"commitment 存活但没有 stay 锚点"时的常态入口。实机 `runtime_20260924_172825.log` 中它每帧打印 `Revisit [pick]: ... staying=no → explore`，但下一行实际走的是 `_commitment_holds` → HOLD → framing（相机并未 explore）。**日志标签与真实分支不符**，会误导基于日志的判断。
-- **归属**：**既存**（P0008.1 commitment 引入时即有），非本轮 diff 引入 → 只登记，本轮不修。
-
-### presence 变陈旧会让 session 静默休眠（不是 RELEASE）
-- **证据（实机 `runtime_20260924_172825.log`）**：t=113–205s 出现 **83.8s 连续无任何 face/person 检测**（该窗口 92s 内仅 74 个检测帧 = 16% 覆盖）。期间 `_last_track_hit` 变陈旧 → `_tracking_session_active()` 为假 → framing 完全停止；`_commitment_holds` 未被调用（stay 分支提前 return），因此**既不 RELEASE 也不重新建立**。t≈198 检测恢复后由 stay 分支的 `_track_target` 重新点火。
-- **影响**：人一旦长时间不在检测范围内（或检测连续漏检），相机会静默停摆，且没有任何"重新找回来"的路径，直到 stay 闸门恰好再次找到目标。与"acquisition 过窄"同源但触发条件不同（不是 reset，而是 presence 陈旧）。
-- **状态**：未修复（属 acquisition / presence 机制，本轮明确不含）。
 
 ### 人脸 bbox 优先于人体 bbox，会因偏移的人脸框而平移
 - **证据**（实机 14:04:47）：`Framing face: dx=-0.39 dy=0.02 → pan+7`，而同一时刻 person bbox 在 `dx=-0.06` —— 人脸框落在画面左缘，相机因此平移 7°。
