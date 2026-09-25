@@ -594,8 +594,10 @@ class PerceptionRuntime:
 
             # ── Curiosity Revisit (non-blocking, uses cached detections) ──
             if self.revisit_controller:
-                self.revisit_controller.tick(time.time(), faces=faces,
-                                             objects=objects, frame=frame)
+                now = time.time()
+                self.revisit_controller.tick(now, faces=faces, objects=objects,
+                                             frame=frame,
+                                             frame_age=max(0.0, now - timestamp))
 
             # ── Behavioral snapshot every ~30 min ──
             if self.behavior_telemetry and self._frame_count % 9000 == 0:

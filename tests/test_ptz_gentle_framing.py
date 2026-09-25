@@ -22,7 +22,8 @@ import sys
 
 sys.path.insert(0, '.')
 
-from tests.ptz_harness import (build, commanded, face_at, open_session, tick)
+from tests.ptz_harness import (build, commanded, face_at, open_session,
+                               person_at, tick)
 
 # The contract, as numbers rather than as references to the module.
 START_X, AIM_X = 0.15, 0.06     # pan: engage past 0.15, drive to 0.06
@@ -334,3 +335,85 @@ def test_jitter_inside_the_start_offset_does_not_restart_a_follow():
 
     assert not commanded(servo), \
         "movement inside the start offset must never restart a follow"
+
+
+# ── The observation must postdate the camera's own last move ──
+
+def test_a_stale_observation_does_not_re_issue_the_correction():
+    """The camera must not answer a view of the world it has already changed.
+
+    Hardware 2026-09-25 07:57: the pan ran 165°→37° in eight consecutive -15°
+    frames while the measured dx rose from 0.16 to 0.48. Correcting a 128° pan
+    must move dx by -2.3, so the number the loop was reading could not have come
+    from the post-move world: the loop fed its own error back in, ran to a
+    mechanical limit, and then repeated a saturated no-op command forever.
+    """
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+
+    tick(ctrl, servo, 1000.2, face_at(-0.30))        # 13° move → ~0.10s of travel
+    assert servo.pan_to.call_count == 1
+
+    tick(ctrl, servo, 1000.4, face_at(-0.45), frame_age=0.25)
+    assert servo.pan_to.call_count == 1, \
+        "a frame that predates the last move must not drive another correction"
+
+    tick(ctrl, servo, 1000.6, face_at(-0.45), frame_age=0.05)
+    assert servo.pan_to.call_count == 2, \
+        "a frame captured after the move completes is acted on normally"
+
+
+def test_the_settle_gate_does_not_disengage_the_follow():
+    """Waiting for a fresh frame is a wait, not a give-up: the hysteresis state
+    must survive, or the follow would have to re-cross start_offset."""
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+    tick(ctrl, servo, 1000.2, face_at(-0.30))
+    assert ctrl._following()
+
+    tick(ctrl, servo, 1000.4, face_at(-0.10), frame_age=0.25)   # stale → skipped
+    assert ctrl._following(), "the follow must still be engaged"
+
+    tick(ctrl, servo, 1000.9, face_at(-0.10), frame_age=0.05)   # fresh → acts
+    assert servo.pan_to.call_count == 2, \
+        "and it must correct all the way to the aim offset, not stop at start_offset"
+
+
+# ── The two references must agree ──
+
+def test_a_face_outside_the_person_box_is_not_used_as_the_target():
+    """A face box that is not part of the person box is a different target, or a
+    false positive. Switching between two disagreeing references is what made
+    the pan slam between its limits (0.72 of a frame apart, 40°)."""
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+    servo.moving = False
+
+    ctrl.tick(1000.2, faces=face_at(-0.27), objects=[person_at(+0.40, size=160)])
+
+    assert servo.pan_to.call_count == 1
+    assert servo.pan_to.call_args[0][0] - 90 == -15, \
+        "the correction must follow the person box, not a face that is not inside it"
+
+
+def test_a_face_inside_the_person_box_is_still_preferred():
+    """The face is the more precise reference — while it belongs to the person."""
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+    servo.moving = False
+
+    # the face centre (dx=+0.20) sits inside the 300px-wide person box (dx=+0.25)
+    ctrl.tick(1000.2, faces=face_at(+0.20), objects=[person_at(+0.25, size=300)])
+
+    assert servo.pan_to.call_args[0][0] - 90 == -8, \
+        "an inside-the-person face drives the correction (0.20 → -8°), not the person box (0.25 → -10°)"
+
+
+def test_a_face_without_a_person_box_is_still_used():
+    ctrl, servo = build()
+    open_session(ctrl, servo)
+    servo.moving = False
+
+    ctrl.tick(1000.2, faces=face_at(-0.30), objects=[])
+
+    assert servo.pan_to.call_args[0][0] - 90 == 13

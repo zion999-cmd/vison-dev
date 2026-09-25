@@ -85,10 +85,14 @@ def open_session(ctrl, servo, now: float = 1000.0):
     servo.tilt_to.reset_mock()
 
 
-def tick(ctrl, servo, now: float, faces):
-    """One frame with the camera free, so only framing may command."""
+def tick(ctrl, servo, now: float, faces, objects=(), frame_age: float = 0.0):
+    """One frame with the camera free, so only framing may command.
+
+    frame_age is how old the frame was when the controller saw it — the time
+    the loop spent detecting. Zero means "seen the instant it was captured".
+    """
     servo.moving = False
-    ctrl.tick(now, faces=faces, objects=[])
+    ctrl.tick(now, faces=faces, objects=list(objects), frame_age=frame_age)
 
 
 def commanded(servo) -> bool:

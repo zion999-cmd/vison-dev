@@ -50,6 +50,11 @@ FRAMING_START_Y = 0.20      # normalised |dy| that engages a tilt follow
 FRAMING_AIM_Y = 0.08        # normalised |dy| a tilt follow drives to
 FRAMING_GAIN = 1.0          # fraction of the excess removed per update
 
+# Measured on the SG90s: ~8 ms per degree, both axes, plus ~15 ms fixed
+# overhead. Used to know when the camera's own last move has settled, so the
+# next correction is computed from a frame that postdates it.
+SERVO_SEC_PER_DEG = 0.008
+
 
 class RevisitController:
     """Drives PTZ to re-examine curiosity targets.
@@ -115,6 +120,7 @@ class RevisitController:
         self._framing_gain = FRAMING_GAIN
         self._framing_pan = False       # a pan follow is running (hysteresis)
         self._framing_tilt = False      # a tilt follow is running (hysteresis)
+        self._last_track_move = 0.0     # travel time of the last emitted correction
         self._last_track_hit = 0.0      # last time a target was in view (presence signal)
         self._last_tilt_recovery = 0.0   # last time we pulled tilt back from extreme
 
@@ -138,13 +144,17 @@ class RevisitController:
         self._commitment_engine = CommitmentEngine(
             role_engine=role_engine, telemetry=self.commitment_telemetry)
 
-    def tick(self, now: float, faces=None, objects=None, frame=None):
+    def tick(self, now: float, faces=None, objects=None, frame=None,
+             frame_age: float = 0.0):
         """Call periodically from main loop. Non-blocking.
 
         Args:
             faces: pre-computed face detections (avoids re-inference)
             objects: pre-computed YOLO detections (avoids re-inference)
             frame: current BGR frame (for confirmations, avoids camera.read() races)
+            frame_age: seconds since this frame was captured. The framing loop
+                needs it to know whether an observation postdates its own last
+                move — see _acquire_track_target.
 
         Picks between:
         - Entity targets (InterestEngine): things we've seen before
@@ -154,6 +164,8 @@ class RevisitController:
         self._cached_faces = faces
         self._cached_objects = objects
         self._cached_frame = frame
+        # How old this frame was when we saw it (the loop's detection time).
+        self._frame_age = frame_age
 
         # ── Process pending confirmations (main-thread, no Timer races) ──
         if self._pending_entity:
@@ -700,34 +712,64 @@ class RevisitController:
         """
         if self._servo_ptz is None or self._servo_ptz.moving:
             return None
-        if not self._following() and now - self._last_track < self._track_interval:
+
+        # The decision cadence (1.5s) gates whether a follow may start. An
+        # engaged follow refreshes its goal on every *fresh* observation — and
+        # fresh means the frame was captured after the camera's own last move
+        # finished. Without that, the loop answers a view of the world it has
+        # already changed, computes the same correction again, and runs away:
+        # on hardware 2026-09-25 07:57 the pan crossed 165°→37° in eight
+        # consecutive -15° frames while the measured dx rose 0.16→0.48 (a 128°
+        # pan must move dx by -2.3), ending pinned at its mechanical limit
+        # repeating a saturated no-op command.
+        if self._following():
+            if now - self._frame_age < self._last_track + self._last_track_move:
+                return None
+        elif now - self._last_track < self._track_interval:
             return None
 
         # Use pre-computed detections from main loop (avoids duplicate ONNX inference)
         faces = self._cached_faces or []
         objects = self._cached_objects or []
 
-        # Priority: face > YOLO person (largest bbox = closest)
-        best_cx, best_cy, label = None, None, ""
-
-        # 1. Face detection — most precise for framing
-        if faces:
-            b = max(faces, key=lambda f: f.get("confidence", 0)).get("bbox", {})
-            if b:
-                best_cx = b.get("x", 0) + b.get("width", 0) / 2
-                best_cy = b.get("y", 0) + b.get("height", 0) / 2
-                label = "face"
-
-        # 2. YOLO person — bbox gives exact position
-        if best_cx is None and objects:
+        # The person box, if any (largest = closest to the camera).
+        person = None
+        if objects:
             persons = [o for o in objects if o.get("class_name") == "person"]
             if persons:
-                # Pick largest person bbox (closest to camera, most reliable)
-                p = max(persons, key=lambda o:
-                        o["bbox"]["width"] * o["bbox"]["height"])
-                best_cx = p.get("center_x", 0)
-                best_cy = p.get("center_y", 0)
-                label = "person"
+                person = max(persons, key=lambda o:
+                             o["bbox"]["width"] * o["bbox"]["height"])
+
+        # Priority: a face that belongs to that person > the person box itself.
+        # The face bbox is the more precise reference, but only while it is part
+        # of the body being framed: a face box outside the person box is either
+        # a false positive or somebody else, and alternating between two
+        # references that disagree by most of a frame is what slammed the pan
+        # between its limits (2026-09-25 07:57: face dx=-0.27 against person
+        # dx=+0.45 within the same second). With no person box, the best face is
+        # all there is.
+        best_cx, best_cy, label = None, None, ""
+        if faces:
+            inside = [f for f in faces
+                      if person is not None and self._face_within_person(f, person)]
+            if inside:
+                candidate = max(inside, key=lambda f: f.get("confidence", 0))
+            elif person is None:
+                candidate = max(faces, key=lambda f: f.get("confidence", 0))
+            else:
+                candidate = None
+            if candidate is not None:
+                b = candidate.get("bbox", {})
+                if b:
+                    best_cx = b.get("x", 0) + b.get("width", 0) / 2
+                    best_cy = b.get("y", 0) + b.get("height", 0) / 2
+                    label = "face"
+
+        # No usable face — the person bbox gives the exact position.
+        if best_cx is None and person is not None:
+            best_cx = person.get("center_x", 0)
+            best_cy = person.get("center_y", 0)
+            label = "person"
 
         if best_cx is None:
             return None
@@ -790,6 +832,8 @@ class RevisitController:
             return
 
         self._last_track = now
+        # Pan and tilt are two servos: the move lasts as long as the longer one.
+        self._last_track_move = max(abs(pan_delta), abs(tilt_delta)) * SERVO_SEC_PER_DEG
         logger.info("Framing %s: dx=%.2f dy=%.2f → pan%+d tilt%+d (pan=%d tilt=%d)",
                     label, dx, dy, pan_delta, tilt_delta,
                     self._servo_ptz.pan, current_tilt)
@@ -805,6 +849,21 @@ class RevisitController:
             pan=self._servo_ptz.pan + pan_delta if pan_delta else None,
             tilt=self._servo_ptz.tilt + tilt_delta if tilt_delta else None,
         )
+
+    @staticmethod
+    def _face_within_person(face, person) -> bool:
+        """Is this face's centre inside that person's box?
+
+        The face is the more precise reference for framing, but only when it is
+        part of the person being framed.
+        """
+        f, p = face.get("bbox") or {}, person.get("bbox") or {}
+        if not f or not p:
+            return False
+        cx = f.get("x", 0) + f.get("width", 0) / 2
+        cy = f.get("y", 0) + f.get("height", 0) / 2
+        return (p.get("x", 0) <= cx <= p.get("x", 0) + p.get("width", 0)
+                and p.get("y", 0) <= cy <= p.get("y", 0) + p.get("height", 0))
 
     @staticmethod
     def _framing_step(offset: float, start: float, aim: float,
